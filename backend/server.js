@@ -554,7 +554,7 @@ Use tools proactively. Think step by step. Be concise and accurate.`;
 
   const messages = [
     { role: 'system', content: systemPrompt },
-    ...session.messages.slice(-30)
+    ...session.messages.slice(-30).map(m => ({ role: m.role, content: m.content, ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}), ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}) }))
   ];
 
   let iterations = 0;
@@ -676,7 +676,7 @@ Use tools proactively when helpful.`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
-      ...session.messages.slice(-30)
+      ...session.messages.slice(-30).map(m => ({ role: m.role, content: m.content, ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}), ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}) }))
     ];
 
     let iterations = 0;

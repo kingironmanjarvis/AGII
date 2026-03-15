@@ -1,30 +1,19 @@
 services:
-  # Backend API
   - type: web
     name: agii-v10-backend
-    runtime: node
+    env: node
     rootDir: backend
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node server.js
     envVars:
       - key: GROQ_API_KEY
         sync: false
       - key: NODE_ENV
         value: production
-    healthCheckPath: /health
 
-  # Frontend (Static)
   - type: web
     name: agii-v10-frontend
-    runtime: static
+    env: static
     rootDir: frontend
-    buildCommand: echo "Static site - no build needed"
+    buildCommand: echo "Static site"
     staticPublishPath: .
-    headers:
-      - path: /*
-        name: Cache-Control
-        value: no-cache
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html

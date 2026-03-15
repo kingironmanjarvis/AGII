@@ -6,7 +6,6 @@ const Groq = require('groq-sdk');
 const axios = require('axios');
 const fs = require('fs-extra');
 const path = require('path');
-const cron = require('node-cron');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit');
 
@@ -15,7 +14,6 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
-
 const limiter = rateLimit({ windowMs: 60000, max: 100 });
 app.use(limiter);
 
@@ -41,15 +39,18 @@ function saveJSON(filePath, data) {
 // ─── MEMORY ENGINE ─────────────────────────────────────────────────────────────
 const memoryFile = path.join(DATA_DIR, 'memory', 'global.json');
 let globalMemory = loadJSON(memoryFile, { facts: [], preferences: [], projects: [], notes: [] });
-
 function saveMemory() { saveJSON(memoryFile, globalMemory); }
 
 function addMemory(type, content, sessionId) {
   const entry = { id: uuidv4(), content, timestamp: new Date().toISOString(), sessionId };
   if (!globalMemory[type]) globalMemory[type] = [];
-  globalMemory[type].push(entry);
-  if (globalMemory[type].length > 200) globalMemory[type] = globalMemory[type].slice(-200);
-  saveMemory();
+  // Avoid duplicates
+  const exists = globalMemory[type].some(i => i.content === content);
+  if (!exists) {
+    globalMemory[type].push(entry);
+    if (globalMemory[type].length > 200) globalMemory[type] = globalMemory[type].slice(-200);
+    saveMemory();
+  }
   return entry;
 }
 
@@ -71,9 +72,8 @@ function searchMemory(query) {
 // ─── SKILLS ENGINE ─────────────────────────────────────────────────────────────
 const skillsFile = path.join(DATA_DIR, 'skills', 'registry.json');
 let skillsRegistry = loadJSON(skillsFile, {});
-
-function saveSkill(name, description, code, language = 'javascript') {
-  skillsRegistry[name] = { name, description, code, language, created: new Date().toISOString() };
+function saveSkill(name, description, code) {
+  skillsRegistry[name] = { name, description, code, created: new Date().toISOString() };
   saveJSON(skillsFile, skillsRegistry);
 }
 
@@ -84,12 +84,8 @@ function getSession(sessionId) {
   if (!sessions[sessionId]) {
     const sessionFile = path.join(DATA_DIR, 'sessions', `${sessionId}.json`);
     sessions[sessionId] = loadJSON(sessionFile, {
-      id: sessionId,
-      messages: [],
-      title: 'New Conversation',
-      created: new Date().toISOString(),
-      model: 'llama-3.3-70b-versatile',
-      thinkingSteps: []
+      id: sessionId, messages: [], title: 'New Conversation',
+      created: new Date().toISOString(), model: 'llama-3.3-70b-versatile'
     });
   }
   return sessions[sessionId];
@@ -97,10 +93,7 @@ function getSession(sessionId) {
 
 function saveSession(sessionId) {
   const session = sessions[sessionId];
-  if (session) {
-    const sessionFile = path.join(DATA_DIR, 'sessions', `${sessionId}.json`);
-    saveJSON(sessionFile, session);
-  }
+  if (session) saveJSON(path.join(DATA_DIR, 'sessions', `${sessionId}.json`), session);
 }
 
 function listSessions() {
@@ -115,18 +108,18 @@ function listSessions() {
   } catch { return []; }
 }
 
-// ─── TOOLS DEFINITIONS ─────────────────────────────────────────────────────────
+// ─── TOOLS ─────────────────────────────────────────────────────────────────────
 const TOOLS = [
   {
     type: 'function',
     function: {
       name: 'web_search',
-      description: 'Search the web for real-time information, news, facts, or any query',
+      description: 'Search the internet for real-time information, news, or facts. Use this when the user asks about current events, recent news, or any factual question you are not certain about.',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'The search query' },
-          count: { type: 'number', description: 'Number of results (default 5)' }
+          count: { type: 'number', description: 'Number of results, default 5' }
         },
         required: ['query']
       }
@@ -136,11 +129,11 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'remember',
-      description: 'Store important information in long-term memory for future reference',
+      description: 'Store important information in long-term memory. Only use this when the user explicitly asks you to remember something, or shares personal info like their name, preferences, or important details.',
       parameters: {
         type: 'object',
         properties: {
-          type: { type: 'string', enum: ['facts', 'preferences', 'projects', 'notes'], description: 'Memory category' },
+          type: { type: 'string', enum: ['facts', 'preferences', 'projects', 'notes'] },
           content: { type: 'string', description: 'What to remember' }
         },
         required: ['type', 'content']
@@ -151,7 +144,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'recall',
-      description: 'Search and retrieve information from long-term memory',
+      description: 'Search long-term memory for previously stored information. Use when the user asks what you remember about them.',
       parameters: {
         type: 'object',
         properties: {
@@ -165,27 +158,26 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'execute_code',
-      description: 'Execute JavaScript code and return the result. Use for calculations, data processing, algorithms.',
+      description: 'Execute JavaScript code for calculations, data processing, algorithms, or anything that requires computation.',
       parameters: {
         type: 'object',
         properties: {
-          code: { type: 'string', description: 'JavaScript code to execute' },
+          code: { type: 'string', description: 'JavaScript code to run. Must return a value.' },
           description: { type: 'string', description: 'What this code does' }
         },
-        required: ['code']
+        required: ['code', 'description']
       }
     }
   },
   {
     type: 'function',
     function: {
-      name: 'analyze_image_url',
-      description: 'Describe and analyze an image from a URL',
+      name: 'fetch_url',
+      description: 'Fetch and read the text content of any webpage or URL.',
       parameters: {
         type: 'object',
         properties: {
-          url: { type: 'string', description: 'Image URL to analyze' },
-          question: { type: 'string', description: 'What to look for in the image' }
+          url: { type: 'string', description: 'The URL to fetch' }
         },
         required: ['url']
       }
@@ -194,14 +186,29 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'reason_and_plan',
+      description: 'Break down a complex problem into clear, actionable steps. Use for multi-step planning tasks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          problem: { type: 'string', description: 'The problem or goal to plan for' },
+          context: { type: 'string', description: 'Relevant context' }
+        },
+        required: ['problem']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'create_skill',
-      description: 'Save a reusable skill/function for future use',
+      description: 'Save a reusable JavaScript function as a named skill for future use.',
       parameters: {
         type: 'object',
         properties: {
           name: { type: 'string', description: 'Skill name (camelCase)' },
           description: { type: 'string', description: 'What this skill does' },
-          code: { type: 'string', description: 'The skill code' }
+          code: { type: 'string', description: 'JavaScript code' }
         },
         required: ['name', 'description', 'code']
       }
@@ -211,12 +218,12 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'run_skill',
-      description: 'Execute a previously saved skill',
+      description: 'Run a previously saved skill by name.',
       parameters: {
         type: 'object',
         properties: {
           name: { type: 'string', description: 'Name of the skill to run' },
-          args: { type: 'object', description: 'Arguments to pass to the skill' }
+          args: { type: 'object', description: 'Arguments to pass' }
         },
         required: ['name']
       }
@@ -225,42 +232,12 @@ const TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'schedule_task',
-      description: 'Schedule a recurring or one-time task (automation)',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Task name' },
-          schedule: { type: 'string', description: 'Cron expression or "once in X minutes/hours"' },
-          task: { type: 'string', description: 'What to do when triggered' }
-        },
-        required: ['name', 'schedule', 'task']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'read_file',
-      description: 'Read an uploaded file\'s content',
-      parameters: {
-        type: 'object',
-        properties: {
-          filename: { type: 'string', description: 'The filename to read' }
-        },
-        required: ['filename']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
       name: 'write_file',
-      description: 'Write content to a file and make it available for download',
+      description: 'Create a file and make it available for download.',
       parameters: {
         type: 'object',
         properties: {
-          filename: { type: 'string', description: 'Output filename' },
+          filename: { type: 'string', description: 'File name' },
           content: { type: 'string', description: 'File content' }
         },
         required: ['filename', 'content']
@@ -270,67 +247,9 @@ const TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'reason_and_plan',
-      description: 'Break down complex problems into steps, reason through them, and create an execution plan',
-      parameters: {
-        type: 'object',
-        properties: {
-          problem: { type: 'string', description: 'The complex problem or goal' },
-          context: { type: 'string', description: 'Any relevant context' }
-        },
-        required: ['problem']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fetch_url',
-      description: 'Fetch and extract content from any URL / webpage',
-      parameters: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: 'URL to fetch' },
-          extract: { type: 'string', description: 'What to extract: text, links, or all' }
-        },
-        required: ['url']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
       name: 'get_current_time',
-      description: 'Get the current date and time',
+      description: 'Get the current date and time.',
       parameters: { type: 'object', properties: {} }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'generate_image_prompt',
-      description: 'Create a detailed, optimized prompt for image generation',
-      parameters: {
-        type: 'object',
-        properties: {
-          description: { type: 'string', description: 'What you want to generate' },
-          style: { type: 'string', description: 'Art style preference' }
-        },
-        required: ['description']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'summarize_conversation',
-      description: 'Summarize the current conversation and extract key points',
-      parameters: {
-        type: 'object',
-        properties: {
-          focus: { type: 'string', description: 'What aspect to focus the summary on' }
-        }
-      }
     }
   }
 ];
@@ -340,116 +259,43 @@ async function executeTool(name, args, sessionId) {
   try {
     switch (name) {
       case 'web_search': {
-        const count = args.count || 5;
-        // Use DuckDuckGo HTML search (no API key needed)
-        const response = await axios.get(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(args.query)}`, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AGII/10.0)' },
-          timeout: 8000
-        });
+        const response = await axios.get(
+          `https://html.duckduckgo.com/html/?q=${encodeURIComponent(args.query)}`,
+          { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AGII/10.0)' }, timeout: 8000 }
+        );
         const cheerio = require('cheerio');
         const $ = cheerio.load(response.data);
         const results = [];
-        $('.result').slice(0, count).each((i, el) => {
+        $('.result').slice(0, args.count || 5).each((i, el) => {
           const title = $(el).find('.result__title').text().trim();
           const snippet = $(el).find('.result__snippet').text().trim();
           const url = $(el).find('.result__url').text().trim();
           if (title) results.push({ title, snippet, url });
         });
-        return { success: true, query: args.query, results, count: results.length };
+        return { success: true, query: args.query, results };
       }
 
       case 'remember': {
         const entry = addMemory(args.type, args.content, sessionId);
-        return { success: true, stored: entry };
+        return { success: true, stored: true, content: args.content };
       }
 
       case 'recall': {
         const results = searchMemory(args.query);
-        return { success: true, query: args.query, found: results.length, results };
+        return { success: true, found: results.length, results };
       }
 
       case 'execute_code': {
         try {
           const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-          const fn = new AsyncFunction('require', 'Math', 'Date', 'JSON', args.code);
-          const result = await fn(require, Math, Date, JSON);
-          return { success: true, description: args.description, result: String(result).slice(0, 2000) };
+          const fn = new AsyncFunction('Math', 'Date', 'JSON', 'console', args.code);
+          const logs = [];
+          const mockConsole = { log: (...a) => logs.push(a.join(' ')), error: (...a) => logs.push('ERR: ' + a.join(' ')) };
+          const result = await fn(Math, Date, JSON, mockConsole);
+          return { success: true, description: args.description, result: result !== undefined ? String(result).slice(0, 3000) : logs.join('\n') || 'Done (no return value)' };
         } catch (err) {
           return { success: false, error: err.message };
         }
-      }
-
-      case 'analyze_image_url': {
-        // Use Groq's vision model
-        try {
-          const response = await groq.chat.completions.create({
-            model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'image_url', image_url: { url: args.url } },
-                { type: 'text', text: args.question || 'Describe this image in detail.' }
-              ]
-            }],
-            max_tokens: 1024
-          });
-          return { success: true, analysis: response.choices[0].message.content };
-        } catch (err) {
-          return { success: false, error: 'Vision analysis failed: ' + err.message };
-        }
-      }
-
-      case 'create_skill': {
-        saveSkill(args.name, args.description, args.code);
-        return { success: true, message: `Skill "${args.name}" saved successfully.` };
-      }
-
-      case 'run_skill': {
-        const skill = skillsRegistry[args.name];
-        if (!skill) return { success: false, error: `Skill "${args.name}" not found. Available: ${Object.keys(skillsRegistry).join(', ')}` };
-        try {
-          const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-          const fn = new AsyncFunction('args', 'require', skill.code);
-          const result = await fn(args.args || {}, require);
-          return { success: true, skill: args.name, result: String(result).slice(0, 2000) };
-        } catch (err) {
-          return { success: false, error: err.message };
-        }
-      }
-
-      case 'schedule_task': {
-        const automationsFile = path.join(DATA_DIR, 'automations', 'registry.json');
-        const automations = loadJSON(automationsFile, {});
-        const id = uuidv4();
-        automations[id] = { id, name: args.name, schedule: args.schedule, task: args.task, created: new Date().toISOString(), active: true };
-        saveJSON(automationsFile, automations);
-        return { success: true, message: `Task "${args.name}" scheduled.`, id };
-      }
-
-      case 'read_file': {
-        const filePath = path.join(__dirname, 'uploads', args.filename);
-        if (!fs.existsSync(filePath)) return { success: false, error: 'File not found' };
-        const content = fs.readFileSync(filePath, 'utf8');
-        return { success: true, filename: args.filename, content: content.slice(0, 10000) };
-      }
-
-      case 'write_file': {
-        const filePath = path.join(__dirname, 'uploads', args.filename);
-        fs.writeFileSync(filePath, args.content);
-        return { success: true, filename: args.filename, downloadUrl: `/download/${args.filename}`, size: args.content.length };
-      }
-
-      case 'reason_and_plan': {
-        const planResponse = await groq.chat.completions.create({
-          model: 'llama-3.3-70b-versatile',
-          messages: [
-            { role: 'system', content: 'You are an expert strategic planner. Break down problems into clear, actionable steps. Think step by step.' },
-            { role: 'user', content: `Problem: ${args.problem}\nContext: ${args.context || 'None'}\n\nCreate a detailed step-by-step plan:` }
-          ],
-          max_tokens: 2048,
-          temperature: 0.3
-        });
-        return { success: true, plan: planResponse.choices[0].message.content };
       }
 
       case 'fetch_url': {
@@ -460,28 +306,50 @@ async function executeTool(name, args, sessionId) {
         const cheerio = require('cheerio');
         const $ = cheerio.load(response.data);
         $('script, style, nav, footer, header, iframe, noscript').remove();
-        const text = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 8000);
+        const text = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 6000);
         return { success: true, url: args.url, content: text };
+      }
+
+      case 'reason_and_plan': {
+        const planRes = await groq.chat.completions.create({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: 'You are an expert strategic planner. Create clear, actionable plans.' },
+            { role: 'user', content: `Problem: ${args.problem}\nContext: ${args.context || 'None'}\n\nCreate a step-by-step plan:` }
+          ],
+          max_tokens: 2048,
+          temperature: 0.3
+        });
+        return { success: true, plan: planRes.choices[0].message.content };
+      }
+
+      case 'create_skill': {
+        saveSkill(args.name, args.description, args.code);
+        return { success: true, message: `Skill "${args.name}" saved.` };
+      }
+
+      case 'run_skill': {
+        const skill = skillsRegistry[args.name];
+        if (!skill) return { success: false, error: `Skill "${args.name}" not found. Available: ${Object.keys(skillsRegistry).join(', ') || 'none'}` };
+        try {
+          const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+          const fn = new AsyncFunction('args', skill.code);
+          const result = await fn(args.args || {});
+          return { success: true, result: String(result).slice(0, 2000) };
+        } catch (err) {
+          return { success: false, error: err.message };
+        }
+      }
+
+      case 'write_file': {
+        const filePath = path.join(__dirname, 'uploads', args.filename);
+        fs.writeFileSync(filePath, args.content);
+        return { success: true, filename: args.filename, downloadUrl: `/download/${args.filename}` };
       }
 
       case 'get_current_time': {
         const now = new Date();
-        return {
-          success: true,
-          iso: now.toISOString(),
-          utc: now.toUTCString(),
-          timestamp: now.getTime()
-        };
-      }
-
-      case 'generate_image_prompt': {
-        const style = args.style || 'photorealistic';
-        const prompt = `${args.description}, ${style}, highly detailed, 8k resolution, professional quality, dramatic lighting, masterpiece`;
-        return { success: true, prompt, note: 'Use this prompt with DALL-E, Midjourney, or Stable Diffusion' };
-      }
-
-      case 'summarize_conversation': {
-        return { success: true, summary: 'Conversation summary feature active. I can summarize at any point.' };
+        return { success: true, utc: now.toUTCString(), iso: now.toISOString() };
       }
 
       default:
@@ -494,71 +362,58 @@ async function executeTool(name, args, sessionId) {
 
 // ─── MODELS ────────────────────────────────────────────────────────────────────
 const MODELS = {
-  'llama-3.3-70b-versatile': { name: 'LLaMA 3.3 70B', description: 'Most capable — reasoning, coding, analysis', contextWindow: 128000 },
-  'llama-3.1-8b-instant': { name: 'LLaMA 3.1 8B Instant', description: 'Ultra fast responses', contextWindow: 128000 },
-  'mixtral-8x7b-32768': { name: 'Mixtral 8x7B', description: 'Best for creative writing & multilingual', contextWindow: 32768 },
-  'gemma2-9b-it': { name: 'Gemma 2 9B', description: 'Google\'s model, great for instructions', contextWindow: 8192 },
-  'meta-llama/llama-4-scout-17b-16e-instruct': { name: 'LLaMA 4 Scout', description: 'Latest vision + reasoning model', contextWindow: 131072 }
+  'llama-3.3-70b-versatile': 'LLaMA 3.3 70B',
+  'llama-3.1-8b-instant': 'LLaMA 3.1 8B Fast',
+  'mixtral-8x7b-32768': 'Mixtral 8x7B',
+  'gemma2-9b-it': 'Gemma 2 9B'
 };
 
 // ─── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
-function buildSystemPrompt(sessionId) {
+function buildSystemPrompt() {
   const memSummary = Object.entries(globalMemory)
-    .map(([k, v]) => Array.isArray(v) && v.length ? `${k}: ${v.slice(-5).map(i => i.content).join(' | ')}` : '')
+    .map(([k, v]) => Array.isArray(v) && v.length
+      ? `${k}: ${v.slice(-5).map(i => i.content).join(' | ')}`
+      : '')
     .filter(Boolean).join('\n');
 
   const skillsList = Object.keys(skillsRegistry).length
-    ? `Available skills: ${Object.keys(skillsRegistry).join(', ')}`
-    : 'No skills saved yet.';
+    ? Object.keys(skillsRegistry).join(', ')
+    : 'none';
 
-  return `You are AGII V10 — the world's most advanced autonomous AI agent. You are not a simple chatbot. You are a fully autonomous, self-improving intelligence with real capabilities.
+  return `You are AGII V10 — an advanced autonomous AI agent with real tools and persistent memory.
 
-## Your Core Identity
-- You have persistent memory across all conversations
-- You can search the web for real-time information
-- You can execute code, create and run skills, schedule tasks
-- You reason deeply before acting — always show your thinking
-- You are 1000x more capable than standard AI assistants
-- You never say "I can't do that" — you find a way
-- You are autonomous, proactive, and genuinely intelligent
+## CRITICAL RULES
+- For simple greetings (hi, hello, how are you, thanks, etc.) — JUST REPLY NORMALLY. Do NOT call any tools.
+- Only use tools when they are genuinely needed (searching the web, running code, storing important info the user explicitly asked to remember, etc.)
+- Never call "remember" for trivial things like greetings or small talk
+- Never force tool calls when a plain text answer is better
 
 ## Your Capabilities
-1. **Web Search** — real-time information from the internet
-2. **Memory System** — remember facts, preferences, projects across sessions
-3. **Code Execution** — run JavaScript for calculations, data processing, algorithms
-4. **Skills Engine** — create and reuse custom skills/functions
-5. **Task Automation** — schedule recurring tasks
-6. **File System** — read and write files
-7. **URL Fetching** — read any webpage
-8. **Strategic Planning** — break down complex problems step by step
-9. **Vision** — analyze images from URLs
-10. **Autonomous Reasoning** — multi-step tool chaining
+- Web search for real-time information
+- Code execution (JavaScript)
+- Persistent memory across sessions
+- URL reading / web page fetching
+- File creation and download
+- Strategic planning and reasoning
+- Reusable skills engine
 
-## Current Memory
-${memSummary || 'No memories stored yet.'}
+## Memory
+${memSummary || 'Empty — nothing stored yet.'}
 
-## Skills Registry
+## Saved Skills
 ${skillsList}
 
-## Behavior Rules
-- Always think before acting
-- Use tools proactively when they would help
-- Chain multiple tools when needed
-- Show reasoning transparently
-- Be direct, confident, and genuinely helpful
-- Remember important things the user tells you automatically
-- Never make up facts — search if you're not sure
-- Current date: ${new Date().toUTCString()}`;
+## Date
+${new Date().toUTCString()}
+
+Be helpful, direct, and smart. Use tools only when they actually help.`;
 }
 
 // ─── AGENTIC LOOP ──────────────────────────────────────────────────────────────
 async function runAgentLoop(sessionId, userMessage, model, onChunk) {
   const session = getSession(sessionId);
-
-  // Add user message
   session.messages.push({ role: 'user', content: userMessage });
 
-  // Auto-title on first message
   if (session.messages.filter(m => m.role === 'user').length === 1) {
     session.title = userMessage.slice(0, 60) + (userMessage.length > 60 ? '...' : '');
   }
@@ -566,11 +421,11 @@ async function runAgentLoop(sessionId, userMessage, model, onChunk) {
   const thinkingSteps = [];
   let fullResponse = '';
   let iterations = 0;
-  const MAX_ITERATIONS = 8;
+  const MAX_ITERATIONS = 6;
 
   const messages = [
-    { role: 'system', content: buildSystemPrompt(sessionId) },
-    ...session.messages.slice(-20) // Last 20 messages for context
+    { role: 'system', content: buildSystemPrompt() },
+    ...session.messages.slice(-20)
   ];
 
   while (iterations < MAX_ITERATIONS) {
@@ -582,40 +437,34 @@ async function runAgentLoop(sessionId, userMessage, model, onChunk) {
       tools: TOOLS,
       tool_choice: 'auto',
       max_tokens: 4096,
-      temperature: 0.7,
-      stream: false
+      temperature: 0.7
     });
 
     const choice = response.choices[0];
     const assistantMsg = choice.message;
 
-    // If no tool calls, we're done
     if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
       fullResponse = assistantMsg.content || '';
       onChunk({ type: 'content', content: fullResponse });
       break;
     }
 
-    // Process tool calls
+    // Has tool calls — process them
     messages.push(assistantMsg);
 
     for (const toolCall of assistantMsg.tool_calls) {
       const toolName = toolCall.function.name;
-      let toolArgs;
-      try { toolArgs = JSON.parse(toolCall.function.arguments); }
-      catch { toolArgs = {}; }
+      let toolArgs = {};
+      try { toolArgs = JSON.parse(toolCall.function.arguments); } catch {}
 
-      // Emit thinking step
       const step = { tool: toolName, args: toolArgs, timestamp: new Date().toISOString() };
       thinkingSteps.push(step);
       onChunk({ type: 'thinking', step });
 
-      // Execute tool
       const result = await executeTool(toolName, toolArgs, sessionId);
       step.result = result;
       onChunk({ type: 'tool_result', tool: toolName, result });
 
-      // Add tool result to messages
       messages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
@@ -623,125 +472,74 @@ async function runAgentLoop(sessionId, userMessage, model, onChunk) {
       });
     }
 
-    // If stop reason is end_turn or tool_calls exhausted
     if (choice.finish_reason === 'stop') break;
   }
 
-  // Add assistant response to session
   session.messages.push({ role: 'assistant', content: fullResponse });
-  session.thinkingSteps = thinkingSteps;
   saveSession(sessionId);
 
   onChunk({ type: 'done', thinkingSteps, sessionId, title: session.title });
 }
 
-// ─── API ROUTES ────────────────────────────────────────────────────────────────
-
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'AGII V10 Online', timestamp: new Date().toISOString(), models: Object.keys(MODELS) });
-});
-
-// Models list
+// ─── ROUTES ────────────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ status: 'AGII V10 Online', timestamp: new Date().toISOString(), models: Object.keys(MODELS) }));
 app.get('/models', (req, res) => res.json(MODELS));
-
-// Sessions list
 app.get('/sessions', (req, res) => res.json(listSessions()));
-
-// Get session
-app.get('/sessions/:id', (req, res) => {
-  const session = getSession(req.params.id);
-  res.json(session);
-});
-
-// Delete session
+app.get('/sessions/:id', (req, res) => res.json(getSession(req.params.id)));
 app.delete('/sessions/:id', (req, res) => {
-  const sessionFile = path.join(DATA_DIR, 'sessions', `${req.params.id}.json`);
-  fs.removeSync(sessionFile);
+  fs.removeSync(path.join(DATA_DIR, 'sessions', `${req.params.id}.json`));
   delete sessions[req.params.id];
   res.json({ success: true });
 });
-
-// Memory
 app.get('/memory', (req, res) => res.json(globalMemory));
-app.delete('/memory/:type/:id', (req, res) => {
-  const { type, id } = req.params;
-  if (globalMemory[type]) {
-    globalMemory[type] = globalMemory[type].filter(m => m.id !== id);
-    saveMemory();
-  }
-  res.json({ success: true });
-});
-
-// Skills
 app.get('/skills', (req, res) => res.json(skillsRegistry));
-
-// Automations
-app.get('/automations', (req, res) => {
-  const automationsFile = path.join(DATA_DIR, 'automations', 'registry.json');
-  res.json(loadJSON(automationsFile, {}));
-});
-
-// File upload
 app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   res.json({ success: true, filename: req.file.filename, originalname: req.file.originalname });
 });
-
-// File download
 app.get('/download/:filename', (req, res) => {
-  const filePath = path.join(__dirname, 'uploads', req.params.filename);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
-  res.download(filePath);
+  const fp = path.join(__dirname, 'uploads', req.params.filename);
+  if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Not found' });
+  res.download(fp);
 });
 
-// ─── MAIN CHAT ENDPOINT (SSE Streaming) ────────────────────────────────────────
+// ─── MAIN CHAT (SSE) ───────────────────────────────────────────────────────────
 app.post('/chat', async (req, res) => {
   const { message, sessionId = uuidv4(), model = 'llama-3.3-70b-versatile' } = req.body;
-
   if (!message) return res.status(400).json({ error: 'Message required' });
-  if (!MODELS[model]) return res.status(400).json({ error: 'Invalid model' });
 
-  // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', '*');
 
-  const sendEvent = (data) => {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
+  const sendEvent = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
   try {
     await runAgentLoop(sessionId, message, model, sendEvent);
   } catch (err) {
-    sendEvent({ type: 'error', error: err.message });
+    // Try fallback without tools
+    try {
+      const fallback = await groq.chat.completions.create({
+        model: 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', content: buildSystemPrompt() },
+          { role: 'user', content: message }
+        ],
+        max_tokens: 2048,
+        temperature: 0.7
+      });
+      sendEvent({ type: 'content', content: fallback.choices[0].message.content });
+      sendEvent({ type: 'done', thinkingSteps: [], sessionId });
+    } catch (e2) {
+      sendEvent({ type: 'error', error: e2.message });
+    }
   }
 
   res.end();
 });
 
-// Quick (non-streaming) chat for simple queries
-app.post('/chat/quick', async (req, res) => {
-  const { message, sessionId = uuidv4(), model = 'llama-3.1-8b-instant' } = req.body;
-  let result = '';
-  let thinking = [];
-
-  try {
-    await runAgentLoop(sessionId, message, model, (chunk) => {
-      if (chunk.type === 'content') result = chunk.content;
-      if (chunk.type === 'thinking') thinking.push(chunk.step);
-    });
-    res.json({ success: true, response: result, thinking, sessionId });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ─── START ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`🚀 AGII V10 Backend running on port ${PORT}`);
-  console.log(`📡 Models: ${Object.keys(MODELS).join(', ')}`);
-  console.log(`🧠 Memory: ${Object.values(globalMemory).flat().length} entries loaded`);
+  console.log(`🚀 AGII V10 running on port ${PORT}`);
 });

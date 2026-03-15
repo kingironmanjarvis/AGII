@@ -1,0 +1,24 @@
+{
+  "name": "agii-v10-backend",
+  "version": "1.0.0",
+  "description": "AGII V10 - Advanced AI Agent Backend",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "groq-sdk": "^0.9.1",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "axios": "^1.6.2",
+    "cheerio": "^1.0.0-rc.12",
+    "uuid": "^9.0.0",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "node-fetch": "^3.3.2",
+    "wikipedia": "^2.1.2"
+  }
+}

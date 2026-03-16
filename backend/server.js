@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   AGII v13.0 — Production AI Agent Platform
+   AGII v13.1 — Production AI Agent Platform
    Multi-agent orchestration, persistent memory, real tools, self-improvement
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -118,17 +118,17 @@ function skillSave() { jsave(SKILLS_FILE, SKILLS); }
 // AGENT REGISTRY — 11 built-in specialized agents
 // ─────────────────────────────────────────────────────────────────────────────
 const AGENT_DEFS = {
-  orchestrator: { name:'Orchestrator',   emoji:'🧠', role:'orchestrator',   model:'llama-3.3-70b-versatile', desc:'Coordinates all agents. Decomposes complex goals into subtasks and delegates to specialists.' },
-  researcher:   { name:'Researcher',     emoji:'🔍', role:'researcher',     model:'llama-3.3-70b-versatile', desc:'Web search, data gathering, fact verification, literature review.' },
-  coder:        { name:'Code Engineer',  emoji:'💻', role:'coder',          model:'llama-3.3-70b-versatile', desc:'Writes, reviews, debugs and optimizes code in any programming language.' },
-  analyst:      { name:'Analyst',        emoji:'📊', role:'analyst',        model:'llama-3.3-70b-versatile', desc:'Data analysis, pattern recognition, statistical insights, visualization.' },
-  writer:       { name:'Writer',         emoji:'✍️', role:'writer',         model:'llama-3.3-70b-versatile', desc:'Content creation, copywriting, documentation, structured reports.' },
-  planner:      { name:'Planner',        emoji:'📋', role:'planner',        model:'llama-3.3-70b-versatile', desc:'Strategic task decomposition, dependency mapping, timeline estimation.' },
-  critic:       { name:'Critic',         emoji:'🎯', role:'critic',         model:'llama-3.3-70b-versatile', desc:'Quality assurance, error detection, improvement suggestions.' },
+  orchestrator: { name:'Orchestrator',   emoji:'🧠', role:'orchestrator',   model:'llama-3.1-8b-instant', desc:'Coordinates all agents. Decomposes complex goals into subtasks and delegates to specialists.' },
+  researcher:   { name:'Researcher',     emoji:'🔍', role:'researcher',     model:'llama-3.1-8b-instant', desc:'Web search, data gathering, fact verification, literature review.' },
+  coder:        { name:'Code Engineer',  emoji:'💻', role:'coder',          model:'llama-3.1-8b-instant', desc:'Writes, reviews, debugs and optimizes code in any programming language.' },
+  analyst:      { name:'Analyst',        emoji:'📊', role:'analyst',        model:'llama-3.1-8b-instant', desc:'Data analysis, pattern recognition, statistical insights, visualization.' },
+  writer:       { name:'Writer',         emoji:'✍️', role:'writer',         model:'llama-3.1-8b-instant', desc:'Content creation, copywriting, documentation, structured reports.' },
+  planner:      { name:'Planner',        emoji:'📋', role:'planner',        model:'llama-3.1-8b-instant', desc:'Strategic task decomposition, dependency mapping, timeline estimation.' },
+  critic:       { name:'Critic',         emoji:'🎯', role:'critic',         model:'llama-3.1-8b-instant', desc:'Quality assurance, error detection, improvement suggestions.' },
   memory_agent: { name:'Memory Agent',   emoji:'💾', role:'memory_agent',   model:'llama-3.1-8b-instant',    desc:'Knowledge storage, retrieval, context compression.' },
-  executor:     { name:'Executor',       emoji:'⚡', role:'executor',       model:'llama-3.3-70b-versatile', desc:'Runs tools, executes tasks, manages file operations.' },
+  executor:     { name:'Executor',       emoji:'⚡', role:'executor',       model:'llama-3.1-8b-instant', desc:'Runs tools, executes tasks, manages file operations.' },
   monitor:      { name:'Monitor',        emoji:'📡', role:'monitor',        model:'llama-3.1-8b-instant',    desc:'System health, performance metrics, anomaly detection.' },
-  optimizer:    { name:'Optimizer',      emoji:'🔧', role:'optimizer',      model:'llama-3.3-70b-versatile', desc:'Performance analysis, architecture improvements, self-optimization.' },
+  optimizer:    { name:'Optimizer',      emoji:'🔧', role:'optimizer',      model:'llama-3.1-8b-instant', desc:'Performance analysis, architecture improvements, self-optimization.' },
 };
 
 const AGENTS_FILE = path.join(DATA, 'agents', 'registry.json');
@@ -229,7 +229,7 @@ const SESSIONS = {};
 function sessionGet(id) {
   if (!SESSIONS[id]) {
     const f = path.join(DATA, 'sessions', `${id}.json`);
-    SESSIONS[id] = jload(f, { id, messages: [], title: 'New Conversation', created: new Date().toISOString(), model: 'llama-3.3-70b-versatile', personaId: 'default' });
+    SESSIONS[id] = jload(f, { id, messages: [], title: 'New Conversation', created: new Date().toISOString(), model: 'llama-3.1-8b-instant', personaId: 'default' });
   }
   return SESSIONS[id];
 }
@@ -252,7 +252,7 @@ function sessionList() {
 // ─────────────────────────────────────────────────────────────────────────────
 const PERSONA_FILE = path.join(DATA, 'personas', 'registry.json');
 let PERSONAS = jload(PERSONA_FILE, {
-  default: { id: 'default', name: 'AGII', avatar: '🤖', model: 'llama-3.3-70b-versatile', temperature: 0.7,
+  default: { id: 'default', name: 'AGII', avatar: '🤖', model: 'llama-3.1-8b-instant', temperature: 0.7,
     systemPrompt: `You are AGII — a production-grade multi-agent AI platform. You are precise, powerful, and genuinely capable.\n\nYou coordinate specialized agents, maintain persistent memory, and execute real tools to complete any task.\n\nFor complex goals:\n- Use spawn_agent to delegate to specialists (researcher, coder, analyst, writer, planner, critic, executor)\n- Each agent runs independently with its own tools\n- Synthesize results into a coherent final answer\n\nAlways use tools proactively. Be thorough but concise. Never make up data — search for it.`
   }
 });
@@ -389,7 +389,7 @@ async function execTool(name, args, sessionId, depth = 0) {
 
       case 'reason_and_plan': {
         const c = await groq.chat.completions.create({
-          model: 'llama-3.3-70b-versatile',
+          model: 'llama-3.1-8b-instant',
           messages: [
             { role: 'system', content: 'You are a deep reasoning engine. Think step by step and produce structured plans.' },
             { role: 'user',   content: `Problem: ${args.problem}\n\nProvide:\n1. Problem analysis\n2. Key constraints\n3. Step-by-step plan\n4. Risk assessment\n5. Success criteria` }
@@ -441,7 +441,7 @@ async function execTool(name, args, sessionId, depth = 0) {
           memoryItems: memTotal, skills: Object.keys(SKILLS).length,
           automations: Object.keys(AUTOS).length, agents: Object.keys(AGENTS).length,
           tasks: Object.keys(TASKS).length, knowledgeNodes: KG.nodes.length,
-          uptime: Math.floor(process.uptime()), version: '13.0'
+          uptime: Math.floor(process.uptime()), version: '13.1'
         };
       }
 
@@ -454,7 +454,7 @@ async function execTool(name, args, sessionId, depth = 0) {
       case 'run_benchmark': {
         const start = Date.now();
         const c = await groq.chat.completions.create({
-          model: 'llama-3.3-70b-versatile',
+          model: 'llama-3.1-8b-instant',
           messages: [
             { role: 'system', content: `You are being benchmarked on ${args.test}. Give your best answer.` },
             { role: 'user',   content: args.prompt }
@@ -564,16 +564,47 @@ Always use tools when they add value. For multi-step work, delegate to agents.`;
   let itr       = 0;
   const maxItr  = 10;
 
+  const FALLBACK_MODELS = ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile', 'mixtral-8x7b-32768'];
+  let modelIdx = 0;
+  const preferredModel = session.model || persona.model || 'llama-3.1-8b-instant';
+  // Put preferred model first
+  const modelOrder = [preferredModel, ...FALLBACK_MODELS.filter(m => m !== preferredModel)];
+
   while (itr < maxItr) {
     itr++;
-    const comp   = await groq.chat.completions.create({
-      model:       session.model || persona.model || 'llama-3.3-70b-versatile',
-      messages,
-      tools:       TOOLS,
-      tool_choice: 'auto',
-      temperature: persona.temperature || 0.7,
-      max_tokens:  4096
-    });
+    let comp;
+    let lastErr;
+    // Try models in order until one works
+    for (const tryModel of modelOrder) {
+      try {
+        comp = await groq.chat.completions.create({
+          model:       tryModel,
+          messages,
+          tools:       TOOLS,
+          tool_choice: 'auto',
+          temperature: persona.temperature || 0.7,
+          max_tokens:  4096
+        });
+        break; // success
+      } catch(modelErr) {
+        lastErr = modelErr;
+        sysLog('warn', 'loop', `Model ${tryModel} failed: ${modelErr.message.slice(0,100)}, trying next`);
+        // If it's a tool_use_failed, remove last tool message and retry without tools
+        if (modelErr.message && modelErr.message.includes('tool_use_failed')) {
+          // Try without tools as final fallback
+          try {
+            comp = await groq.chat.completions.create({
+              model: 'llama-3.1-8b-instant',
+              messages: messages.filter(m => m.role !== 'tool'),
+              temperature: 0.7,
+              max_tokens: 4096
+            });
+            break;
+          } catch(e2) { lastErr = e2; }
+        }
+      }
+    }
+    if (!comp) throw lastErr || new Error('All models failed');
     const choice = comp.choices[0];
     const msg    = choice.message;
     messages.push(cleanMsg(msg));
@@ -600,7 +631,7 @@ Always use tools when they add value. For multi-step work, delegate to agents.`;
 
 // Health
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '13.0', uptime: Math.floor(process.uptime()), agents: Object.keys(AGENTS).length, timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '13.1', uptime: Math.floor(process.uptime()), agents: Object.keys(AGENTS).length, timestamp: new Date().toISOString() });
 });
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
@@ -702,7 +733,7 @@ app.post('/api/mission', async (req, res) => {
   // Critic reviews all results
   const allResults = results.map((r, i) => `${tasks[i].role}: ${r.status === 'fulfilled' ? r.value?.result?.slice(0,300) : r.reason}`).join('\n\n');
   const synthesis  = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
+    model: 'llama-3.1-8b-instant',
     messages: [
       { role: 'system', content: 'You are a synthesis agent. Combine the following agent outputs into one coherent, complete response.' },
       { role: 'user',   content: `Goal: ${goal}\n\nAgent outputs:\n${allResults}\n\nSynthesize into a final comprehensive response.` }
@@ -901,12 +932,12 @@ app.get('/api/stats', (req, res) => {
     automations: Object.keys(AUTOS).length, agents: Object.keys(AGENTS).length,
     tasks: Object.keys(TASKS).length, knowledgeNodes: KG.nodes.length,
     experiments: Object.keys(EXPERIMENTS).length,
-    uptime: Math.floor(process.uptime()), version: '13.0'
+    uptime: Math.floor(process.uptime()), version: '13.1'
   });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`🚀 AGII v13.0 running on port ${PORT}`);
-  sysLog('info', 'server', `AGII v13.0 started on port ${PORT}`);
+  console.log(`🚀 AGII v13.1 running on port ${PORT}`);
+  sysLog('info', 'server', `AGII v13.1 started on port ${PORT}`);
 });

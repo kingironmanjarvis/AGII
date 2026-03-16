@@ -512,8 +512,8 @@ html,body{height:100%;overflow:hidden;font-family:'Inter',sans-serif;background:
 
     <!-- Model selector -->
     <div class="model-sel" id="msel" onclick="toggleMdd(event)">
-      <span id="cur-badge" class="mbadge mb-rec">Recommended</span>
-      <span id="cur-model" class="model-name">Llama 3.3 70B</span>
+      <span id="cur-badge" class="mbadge mb-fast">Fast</span>
+      <span id="cur-model" class="model-name">Llama 3.1 8B</span>
       <span class="model-arr">▾</span>
       <div class="model-dd" id="mdd" onclick="event.stopPropagation()"></div>
     </div>
@@ -664,7 +664,7 @@ let allSessions  = [];
 let allAgents    = [];
 let allPersonas  = [];
 let allModels    = [];
-let curModel     = 'llama-3.3-70b-versatile';
+let curModel     = 'llama-3.1-8b-instant';
 let curPersona   = 'default';
 let isGenerating = false;
 let attachedImg  = null;
@@ -685,7 +685,7 @@ async function loadModels() {
   } catch {}
 }
 
-const badgeMap = { Recommended:'mb-rec', Fast:'mb-fast', Reasoning:'mb-rsn', Vision:'mb-vis', Google:'mb-ggl', 'Long Context':'mb-lng' };
+const badgeMap = { Recommended:'mb-rec', Fast:'mb-fast', Powerful:'mb-rec', Reasoning:'mb-rsn', Vision:'mb-vis', Google:'mb-ggl', 'Long Context':'mb-lng' };
 
 function renderModelDropdown() {
   document.getElementById('mdd').innerHTML = allModels.map(m => `

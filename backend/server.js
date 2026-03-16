@@ -29,31 +29,31 @@ const groq   = new Groq({ apiKey: process.env.GROQ_API_KEY });
 // ─── Rate-limit aware Groq wrapper ───────────────────────────────────────────
 // Groq free tier: ~6000 TPM per model. We queue calls and retry on 429.
 const groqQueue = [];
-let groqActive  = 0;
-const MAX_CONCURRENT = 2;
 
-async function groqCall(params, retries = 4) {
-  // Wait for a concurrency slot
-  while (groqActive >= MAX_CONCURRENT) await new Promise(r => setTimeout(r, 200));
-  groqActive++;
-  try {
-    // Actual Groq API call
-    const result = await groq.chat.completions.create(params);
-    return result;
-  } catch(e) {
-    const msg = e?.message || String(e);
-    if ((msg.includes('429') || msg.includes('rate_limit_exceeded')) && retries > 0) {
-      // Parse the exact wait time from Groq error message
-      const waitMatch = msg.match(/try again in ([0-9.]+)s/i);
-      const wait = waitMatch ? Math.ceil(parseFloat(waitMatch[1]) * 1000) + 1000 : 12000;
-      sysLog('warn', 'groq', `Rate limited on ${params.model} — waiting ${Math.round(wait/1000)}s (retries: ${retries})`);
-      groqActive = Math.max(0, groqActive - 1); // release slot while waiting
-      await new Promise(r => setTimeout(r, wait));
-      return await groqCall(params, retries - 1);
+async function groqCall(params, retries = 3) {
+  const TIMEOUT_MS = 30000; // 30s hard timeout per call
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      // Race the API call against a timeout
+      const result = await Promise.race([
+        groq.chat.completions.create(params),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Groq timeout after 30s')), TIMEOUT_MS))
+      ]);
+      return result;
+    } catch(e) {
+      const msg = e?.message || String(e);
+      const isRateLimit = msg.includes('429') || msg.includes('rate_limit_exceeded');
+      const isTimeout   = msg.includes('timeout');
+      if ((isRateLimit || isTimeout) && attempt < retries) {
+        let wait = isRateLimit
+          ? (() => { const m = msg.match(/try again in ([0-9.]+)s/i); return m ? Math.ceil(parseFloat(m[1])*1000)+500 : 8000; })()
+          : 3000;
+        sysLog('warn', 'groq', `${isRateLimit?'Rate limited':'Timeout'} on ${params.model} — wait ${Math.round(wait/1000)}s (attempt ${attempt+1}/${retries})`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw e;
     }
-    throw e;
-  } finally {
-    groqActive = Math.max(0, groqActive - 1);
   }
 }
 

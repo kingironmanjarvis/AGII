@@ -1,8 +1,9 @@
 {
-  "name": "agii-v13-backend",
-  "version": "13.0.0",
+  "name": "agii-platform",
+  "version": "14.0.0",
   "description": "AGII — Production Multi-Agent AI Platform",
   "main": "server.js",
+  "engines": { "node": ">=18.0.0" },
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"

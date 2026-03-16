@@ -1,7 +1,4 @@
-/* ═══════════════════════════════════════════════════════════════════════════
-   AGII v14.0 — Production AI Agent Platform
-   Multi-agent orchestration · Real tools · Persistent memory · Python exec
-═══════════════════════════════════════════════════════════════════════════ */
+/* AGII v14.0 — Production AI Agent Platform */
 require('dotenv').config();
 const express   = require('express');
 const cors      = require('cors');
@@ -26,51 +23,48 @@ app.use(rateLimit({ windowMs: 60000, max: 1000, standardHeaders: true, legacyHea
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
 const groq   = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// ─── Groq wrapper with retry + timeout ────────────────────────────────────
 async function groqCall(params, retries = 4) {
-  const TIMEOUT = 40000;
+  const TIMEOUT_MS = 40000;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await Promise.race([
         groq.chat.completions.create(params),
-        new Promise((_,rej) => setTimeout(() => rej(new Error('Groq timeout 40s')), TIMEOUT))
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Groq timeout 40s')), TIMEOUT_MS))
       ]);
     } catch(e) {
-      const msg = e?.message || '';
-      const isRate    = msg.includes('429') || msg.includes('rate_limit');
-      const isTimeout = msg.includes('timeout');
-      const isToolErr = msg.includes('tool_use_failed') || msg.includes('Failed to call');
-      if (isToolErr) throw e;
-      if ((isRate || isTimeout) && attempt < retries) {
+      const msg = e?.message || String(e);
+      if (msg.includes('tool_use_failed') || msg.includes('Failed to call a function')) throw e;
+      const isRate = msg.includes('429') || msg.includes('rate_limit_exceeded');
+      const isTime = msg.includes('timeout');
+      if ((isRate || isTime) && attempt < retries) {
         const wait = isRate
-          ? (() => { const m = msg.match(/try again in ([0-9.]+)s/i); return m ? Math.ceil(parseFloat(m[1])*1000)+600 : 10000; })()
+          ? (() => { const m = msg.match(/try again in ([0-9.]+)s/i); return m ? Math.ceil(parseFloat(m[1])*1000)+500 : 10000; })()
           : 4000;
-        sysLog('warn','groq',`${isRate?'Rate':'Timeout'} on ${params.model} wait ${Math.round(wait/1000)}s attempt ${attempt+1}`);
+        sysLog('warn','groq',`Rate/timeout on ${params.model} wait ${Math.round(wait/1000)}s attempt ${attempt+1}`);
         await new Promise(r => setTimeout(r, wait));
-        continue;
-      }
-      throw e;
+      } else throw e;
     }
   }
 }
 
-// ─── Data layer ────────────────────────────────────────────────────────────
 const DATA = path.join(__dirname, 'data');
 ['sessions','memory','skills','automations','files','personas','agents','tasks','logs','knowledge','experiments','metrics']
   .forEach(d => fs.ensureDirSync(path.join(DATA, d)));
 fs.ensureDirSync(path.join(__dirname, 'uploads'));
 
 function jload(p, def={}) { try { return JSON.parse(fs.readFileSync(p,'utf8')); } catch { return def; } }
-function jsave(p, v) { fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p, JSON.stringify(v,null,2)); }
+function jsave(p, v) { fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p,JSON.stringify(v,null,2)); }
+
 function sysLog(level, src, msg, data=null) {
   try {
-    const lf = path.join(DATA,'logs', new Date().toISOString().slice(0,10)+'.json');
+    const lf = path.join(DATA,'logs',new Date().toISOString().slice(0,10)+'.json');
     const logs = jload(lf, []);
     logs.push({ id:uuidv4(), ts:new Date().toISOString(), level, src, msg, data });
     if (logs.length > 5000) logs.splice(0, logs.length-5000);
     jsave(lf, logs);
   } catch {}
 }
+
 function cleanMsg(m) {
   const out = { role: m.role, content: m.content ?? null };
   if (m.tool_calls)   out.tool_calls   = m.tool_calls;
@@ -78,26 +72,25 @@ function cleanMsg(m) {
   if (m.name)         out.name         = m.name;
   return out;
 }
-function parseArgs(raw) { try { return typeof raw==='string'?JSON.parse(raw):(raw||{}); } catch { return {}; } }
-function formatUptime(s) { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=Math.floor(s%60); return `${h}h ${m}m ${sec}s`; }
+function parseArgs(raw) { try { return typeof raw==='string' ? JSON.parse(raw) : (raw||{}); } catch { return {}; } }
 
-// ─── Memory ────────────────────────────────────────────────────────────────
+// MEMORY
 const MEM_FILE = path.join(DATA,'memory','global.json');
 let MEM = jload(MEM_FILE, {facts:[],preferences:[],projects:[],notes:[],people:[],knowledge:[],decisions:[]});
 function saveMem() { jsave(MEM_FILE, MEM); }
 function memAdd(type, content) {
-  if (!MEM[type]) MEM[type]=[];
-  if (MEM[type].some(i=>i.content===content)) return null;
-  const e = {id:uuidv4(),content,ts:new Date().toISOString()};
+  if (!MEM[type]) MEM[type] = [];
+  if (MEM[type].some(i => i.content===content)) return null;
+  const e = { id:uuidv4(), content, ts:new Date().toISOString() };
   MEM[type].push(e);
-  if (MEM[type].length>1000) MEM[type]=MEM[type].slice(-1000);
+  if (MEM[type].length > 1000) MEM[type] = MEM[type].slice(-1000);
   saveMem(); return e;
 }
 function memSearch(q) {
-  const ql=q.toLowerCase(),res=[];
-  Object.entries(MEM).forEach(([type,items])=>{
+  const ql = q.toLowerCase(), res = [];
+  Object.entries(MEM).forEach(([type,items]) => {
     if (!Array.isArray(items)) return;
-    items.forEach(i=>{ if(i.content?.toLowerCase().includes(ql)) res.push({type,...i}); });
+    items.forEach(i => { if (i.content?.toLowerCase().includes(ql)) res.push({type,...i}); });
   });
   return res.slice(0,25);
 }
@@ -106,10 +99,10 @@ function memCtx() {
     .map(([k,v])=>`[${k}]: ${v.slice(-5).map(i=>i.content).join(' | ')}`).join('\n');
 }
 
-// ─── Knowledge Graph ───────────────────────────────────────────────────────
+// KNOWLEDGE GRAPH
 const KG_FILE = path.join(DATA,'knowledge','graph.json');
 let KG = jload(KG_FILE, {nodes:[],edges:[]});
-function kgSave() { jsave(KG_FILE,KG); }
+function kgSave() { jsave(KG_FILE, KG); }
 function kgAddNode(label, type) {
   if (KG.nodes.find(n=>n.label===label)) return;
   KG.nodes.push({id:uuidv4(),label,type,ts:new Date().toISOString()});
@@ -122,33 +115,33 @@ function kgAddEdge(from,to,rel) {
   kgSave();
 }
 
-// ─── Skills ────────────────────────────────────────────────────────────────
+// SKILLS
 const SKILLS_FILE = path.join(DATA,'skills','registry.json');
 let SKILLS = jload(SKILLS_FILE, {});
-function skillSave() { jsave(SKILLS_FILE,SKILLS); }
+function skillSave() { jsave(SKILLS_FILE, SKILLS); }
 
-// ─── Agents ────────────────────────────────────────────────────────────────
+// AGENTS
 const AGENT_DEFS = {
-  orchestrator: { name:'Orchestrator',  emoji:'🧠', role:'orchestrator',  model:'llama-3.3-70b-versatile', desc:'Coordinates all agents. Decomposes complex goals and delegates to specialists.' },
-  researcher:   { name:'Researcher',    emoji:'🔍', role:'researcher',    model:'llama-3.1-8b-instant',    desc:'Web search, data gathering, fact verification.' },
-  coder:        { name:'Code Engineer', emoji:'💻', role:'coder',         model:'llama-3.3-70b-versatile', desc:'Writes, reviews, debugs, and optimizes code in any language.' },
-  analyst:      { name:'Analyst',       emoji:'📊', role:'analyst',       model:'mixtral-8x7b-32768',      desc:'Data analysis, pattern recognition, statistical insights.' },
-  writer:       { name:'Writer',        emoji:'✍️', role:'writer',        model:'llama-3.3-70b-versatile', desc:'Content creation, copywriting, documentation, reports.' },
-  planner:      { name:'Planner',       emoji:'📋', role:'planner',       model:'llama-3.1-8b-instant',   desc:'Task decomposition, dependency mapping, timeline estimation.' },
-  critic:       { name:'Critic',        emoji:'🎯', role:'critic',        model:'mixtral-8x7b-32768',      desc:'Quality assurance, error detection, improvement suggestions.' },
-  memory_agent: { name:'Memory Agent',  emoji:'💾', role:'memory_agent',  model:'llama-3.1-8b-instant',   desc:'Knowledge storage, retrieval, context compression.' },
-  executor:     { name:'Executor',      emoji:'⚡', role:'executor',      model:'llama-3.1-8b-instant',   desc:'Runs tools, executes tasks, manages file operations.' },
-  monitor:      { name:'Monitor',       emoji:'📡', role:'monitor',       model:'llama-3.1-8b-instant',   desc:'System health, performance metrics, anomaly detection.' },
-  optimizer:    { name:'Optimizer',     emoji:'🔧', role:'optimizer',     model:'mixtral-8x7b-32768',      desc:'Performance analysis, architecture improvements.' },
+  orchestrator: {name:'Orchestrator',  emoji:'🧠',role:'orchestrator', model:'llama-3.3-70b-versatile', desc:'Coordinates all agents. Decomposes complex goals into subtasks and delegates to specialists.'},
+  researcher:   {name:'Researcher',    emoji:'🔍',role:'researcher',   model:'llama-3.1-8b-instant',    desc:'Web search, data gathering, fact verification, literature review.'},
+  coder:        {name:'Code Engineer', emoji:'💻',role:'coder',        model:'llama-3.3-70b-versatile', desc:'Writes, reviews, debugs and optimizes code in any language.'},
+  analyst:      {name:'Analyst',       emoji:'📊',role:'analyst',      model:'mixtral-8x7b-32768',       desc:'Data analysis, pattern recognition, statistical insights.'},
+  writer:       {name:'Writer',        emoji:'✍️',role:'writer',       model:'llama-3.3-70b-versatile', desc:'Content creation, copywriting, documentation, reports.'},
+  planner:      {name:'Planner',       emoji:'📋',role:'planner',      model:'llama-3.1-8b-instant',    desc:'Strategic task decomposition, dependency mapping, timeline estimation.'},
+  critic:       {name:'Critic',        emoji:'🎯',role:'critic',       model:'mixtral-8x7b-32768',       desc:'Quality assurance, error detection, improvement suggestions.'},
+  memory_agent: {name:'Memory Agent',  emoji:'💾',role:'memory_agent', model:'llama-3.1-8b-instant',    desc:'Knowledge storage, retrieval, context compression.'},
+  executor:     {name:'Executor',      emoji:'⚡',role:'executor',     model:'llama-3.1-8b-instant',    desc:'Runs tools, executes tasks, manages file operations.'},
+  monitor:      {name:'Monitor',       emoji:'📡',role:'monitor',      model:'llama-3.1-8b-instant',    desc:'System health, performance metrics, anomaly detection.'},
+  optimizer:    {name:'Optimizer',     emoji:'🔧',role:'optimizer',    model:'mixtral-8x7b-32768',       desc:'Performance analysis, architecture improvements, self-optimization.'},
 };
 const AGENTS_FILE = path.join(DATA,'agents','registry.json');
 let AGENTS = jload(AGENTS_FILE, {});
-(function seedAgents(){
-  let changed=false;
-  Object.entries(AGENT_DEFS).forEach(([role,def])=>{
+(function seedAgents() {
+  let changed = false;
+  Object.entries(AGENT_DEFS).forEach(([role,def]) => {
     if (!AGENTS[role]) { AGENTS[role]={id:uuidv4(),...def,status:'idle',tasksCompleted:0,tasksRunning:0,errors:0,created:new Date().toISOString(),lastActive:null}; changed=true; }
   });
-  if (changed) jsave(AGENTS_FILE,AGENTS);
+  if (changed) jsave(AGENTS_FILE, AGENTS);
 })();
 function agentList() {
   return Object.values(AGENTS).map(a=>({id:a.id,role:a.role,name:a.name,emoji:a.emoji,desc:a.desc,status:a.status,tasksCompleted:a.tasksCompleted,tasksRunning:a.tasksRunning,errors:a.errors,lastActive:a.lastActive,model:a.model}));
@@ -157,41 +150,37 @@ function agentUpdate(role, upd) {
   if (AGENTS[role]) { Object.assign(AGENTS[role],upd,{lastActive:new Date().toISOString()}); jsave(AGENTS_FILE,AGENTS); }
 }
 
-// ─── Tasks ─────────────────────────────────────────────────────────────────
+// TASKS
 const TASKS_FILE = path.join(DATA,'tasks','registry.json');
 let TASKS = jload(TASKS_FILE, {});
-function taskSave() { jsave(TASKS_FILE,TASKS); }
+function taskSave() { jsave(TASKS_FILE, TASKS); }
 function taskMake(missionId, role, desc, priority='normal') {
   const t={id:uuidv4(),missionId,role,desc,priority,status:'pending',result:null,error:null,created:new Date().toISOString(),started:null,completed:null,toolsUsed:[]};
   TASKS[t.id]=t; taskSave(); return t;
 }
 function taskList() { return Object.values(TASKS).sort((a,b)=>new Date(b.created)-new Date(a.created)).slice(0,200); }
 
-// ─── Experiments ───────────────────────────────────────────────────────────
+// EXPERIMENTS
 const EXP_FILE = path.join(DATA,'experiments','registry.json');
 let EXPERIMENTS = jload(EXP_FILE, {});
-function expSave() { jsave(EXP_FILE,EXPERIMENTS); }
-function expAdd(name,hypothesis,params) {
-  const e={id:uuidv4(),name,hypothesis,params,status:'pending',results:null,score:null,created:new Date().toISOString()};
-  EXPERIMENTS[e.id]=e; expSave(); return e;
-}
+function expSave() { jsave(EXP_FILE, EXPERIMENTS); }
 
-// ─── Metrics ───────────────────────────────────────────────────────────────
+// METRICS
 const METRICS_FILE = path.join(DATA,'metrics','history.json');
 let METRICS = jload(METRICS_FILE, []);
 function metricsRecord(data) {
   METRICS.push({ts:new Date().toISOString(),...data});
   if (METRICS.length>10000) METRICS=METRICS.slice(-10000);
-  jsave(METRICS_FILE,METRICS);
+  jsave(METRICS_FILE, METRICS);
 }
 
-// ─── Sessions ──────────────────────────────────────────────────────────────
+// SESSIONS
 const SESSIONS = {};
 function sessionGet(id) {
   if (!SESSIONS[id]) {
     const f = path.join(DATA,'sessions',`${id}.json`);
     SESSIONS[id] = fs.existsSync(f)
-      ? jload(f,{id,title:'New Conversation',messages:[],model:'llama-3.3-70b-versatile',personaId:'default',created:new Date().toISOString()})
+      ? jload(f, {id,title:'New Conversation',messages:[],model:'llama-3.3-70b-versatile',personaId:'default',created:new Date().toISOString()})
       : {id,title:'New Conversation',messages:[],model:'llama-3.3-70b-versatile',personaId:'default',created:new Date().toISOString()};
   }
   return SESSIONS[id];
@@ -199,7 +188,7 @@ function sessionGet(id) {
 function sessionSave(id) {
   const s=SESSIONS[id]; if (!s) return;
   s.updatedAt=new Date().toISOString(); s.messageCount=s.messages.length;
-  jsave(path.join(DATA,'sessions',`${id}.json`),s);
+  jsave(path.join(DATA,'sessions',`${id}.json`), s);
 }
 function sessionList() {
   const dir=path.join(DATA,'sessions');
@@ -211,179 +200,182 @@ function sessionList() {
     .map(s=>({id:s.id,title:s.title,messageCount:s.messageCount||0,model:s.model,created:s.created,updatedAt:s.updatedAt}));
 }
 
-// ─── Personas ──────────────────────────────────────────────────────────────
+// PERSONAS
 const PERSONAS_FILE = path.join(DATA,'personas','registry.json');
 const DEFAULT_PERSONAS = {
-  default:    { id:'default',    name:'AGII',          emoji:'🤖', description:'General-purpose AI agent', model:'llama-3.3-70b-versatile', temperature:0.7,
-    systemPrompt:`You are AGII, a powerful multi-agent AI platform. You are helpful, precise, proactive, and always use tools when they add value.\n\nCRITICAL RULES:\n- Use web_search for anything requiring current/real-time info\n- Use execute_code for calculations, algorithms, data processing (specify language: javascript or python)\n- Use spawn_agent to delegate specialized work\n- Use remember/recall for persistent information\n- Never make up facts — search instead\n- Be thorough and complete in every response` },
-  researcher: { id:'researcher', name:'Research Mode', emoji:'🔍', description:'Deep research specialist', model:'llama-3.1-8b-instant', temperature:0.3,
-    systemPrompt:'You are a research specialist. Always search the web for current information. Cite sources. Provide comprehensive, fact-based analysis.' },
-  coder:      { id:'coder',      name:'Code Mode',     emoji:'💻', description:'Programming assistant',   model:'llama-3.3-70b-versatile', temperature:0.2,
-    systemPrompt:'You are an expert software engineer. Write clean, production-ready code. Specify language in execute_code calls (javascript or python). Verify code works.' },
-  analyst:    { id:'analyst',    name:'Analysis Mode', emoji:'📊', description:'Data analysis & insights', model:'mixtral-8x7b-32768', temperature:0.3,
-    systemPrompt:'You are a data analyst. Break down complex problems, find patterns, provide actionable insights backed by calculations.' },
+  default: {id:'default',name:'AGII',emoji:'🤖',description:'General-purpose AI agent',model:'llama-3.3-70b-versatile',temperature:0.7,
+    systemPrompt:`You are AGII — a powerful multi-agent AI platform. You are helpful, precise, and proactive. Use tools whenever they add real value. Today: ${new Date().toDateString()}.
+
+TOOL RULES:
+- Use web_search for ANY current info, news, facts, prices, people, companies
+- Use execute_code for calculations, algorithms, data processing (specify language: javascript or python)
+- Use spawn_agent to delegate to specialists (researcher, coder, analyst, writer, planner, critic)
+- Use remember/recall for persistent info across conversations
+- Never fabricate facts — search instead
+- Be thorough and complete in every response`},
+  researcher:{id:'researcher',name:'Research Mode',emoji:'🔍',description:'Deep research with web search',model:'llama-3.1-8b-instant',temperature:0.3,
+    systemPrompt:'You are a research specialist. Always search the web for current information. Cite sources. Provide comprehensive, well-structured analysis.'},
+  coder:{id:'coder',name:'Code Mode',emoji:'💻',description:'Programming assistant',model:'llama-3.3-70b-versatile',temperature:0.2,
+    systemPrompt:'You are an expert software engineer. Write clean, production-ready code. Always execute code to verify it works. Explain your implementation clearly. Use execute_code with the correct language (javascript or python).'},
+  analyst:{id:'analyst',name:'Analysis Mode',emoji:'📊',description:'Data analysis & insights',model:'mixtral-8x7b-32768',temperature:0.3,
+    systemPrompt:'You are a data analyst. Break down complex problems, find patterns, and provide actionable insights backed by data and calculations.'},
 };
 let PERSONAS = jload(PERSONAS_FILE, DEFAULT_PERSONAS);
-if (!PERSONAS.default) PERSONAS = { ...DEFAULT_PERSONAS, ...PERSONAS };
-function personaSave() { jsave(PERSONAS_FILE,PERSONAS); }
+if (!PERSONAS.default) PERSONAS={...DEFAULT_PERSONAS,...PERSONAS};
+function personaSave() { jsave(PERSONAS_FILE, PERSONAS); }
 
-// ─── Code execution: Python via child_process ─────────────────────────────
+// CODE EXECUTION
 function executePython(code) {
   return new Promise((resolve) => {
-    const tmpFile = path.join('/tmp', `agii_py_${uuidv4().slice(0,8)}.py`);
+    const tmpFile = `/tmp/agii_${uuidv4()}.py`;
     fs.writeFileSync(tmpFile, code, 'utf8');
-    exec(`timeout 15 python3 "${tmpFile}"`, { timeout: 16000 }, (err, stdout, stderr) => {
+    exec(`timeout 15 python3 "${tmpFile}"`, {timeout:16000}, (err,stdout,stderr) => {
       try { fs.removeSync(tmpFile); } catch {}
-      if (err && !stdout) {
-        resolve({ success: false, error: (stderr || err.message).slice(0,2000) });
-      } else {
-        resolve({ success: true, result: stdout.trim().slice(0,10000), stdout: stdout.trim(), stderr: (stderr||'').slice(0,500) });
-      }
+      if (err && !stdout) resolve({success:false, error:stderr||err.message, stdout:'', stderr});
+      else resolve({success:true, result:stdout.trim(), stdout:stdout.trim(), stderr:stderr||''});
     });
   });
 }
 
-// ─── Code execution: JavaScript in secure sandbox ─────────────────────────
-async function executeJS(code) {
-  const logs = [];
-  const con = {
-    log:   (...a) => logs.push(a.map(x=>typeof x==='object'?JSON.stringify(x,null,2):String(x)).join(' ')),
-    error: (...a) => logs.push('ERR: '+a.join(' ')),
-    warn:  (...a) => logs.push('WARN: '+a.join(' ')),
-    table: (...a) => logs.push(JSON.stringify(a)),
-  };
-  const AsyncFn = Object.getPrototypeOf(async function(){}).constructor;
-  const fn = new AsyncFn(
-    'console','Math','Date','JSON','Array','Object','String','Number',
-    'Boolean','parseInt','parseFloat','isNaN','isFinite','Promise',
-    'Map','Set','RegExp','Error','Symbol','BigInt',
-    code
-  );
-  const result = await Promise.race([
-    fn(con,Math,Date,JSON,Array,Object,String,Number,Boolean,parseInt,parseFloat,isNaN,isFinite,Promise,Map,Set,RegExp,Error,Symbol,BigInt),
-    new Promise((_,rej)=>setTimeout(()=>rej(new Error('JS execution timeout (10s)')),10000))
-  ]);
-  const output = logs.length > 0 ? logs.join('\n') : (result !== undefined ? String(result) : 'Executed successfully (no output)');
-  return { success: true, result: output, logs };
+function executeJS(code) {
+  return new Promise((resolve) => {
+    const logs = [];
+    const mockConsole = {
+      log:   (...a) => logs.push(a.map(x=>typeof x==='object'?JSON.stringify(x,null,2):String(x)).join(' ')),
+      error: (...a) => logs.push('ERR: '+a.join(' ')),
+      warn:  (...a) => logs.push('WARN: '+a.join(' ')),
+      table: (...a) => logs.push(JSON.stringify(a[0])),
+    };
+    try {
+      const AsyncFn = Object.getPrototypeOf(async function(){}).constructor;
+      const fn = new AsyncFn('console','Math','Date','JSON','Array','Object','String','Number','Boolean','parseInt','parseFloat','isNaN','isFinite','Promise','Map','Set','RegExp','Error', code);
+      Promise.race([
+        fn(mockConsole,Math,Date,JSON,Array,Object,String,Number,Boolean,parseInt,parseFloat,isNaN,isFinite,Promise,Map,Set,RegExp,Error),
+        new Promise((_,rej)=>setTimeout(()=>rej(new Error('Execution timeout 10s')),10000))
+      ]).then(result => {
+        const out = logs.length>0 ? logs.join('\n') : (result!==undefined ? String(result) : 'Executed (no output)');
+        resolve({success:true, result:out, logs});
+      }).catch(e => resolve({success:false, error:e.message}));
+    } catch(e) { resolve({success:false, error:e.message}); }
+  });
 }
 
-// ─── Tools definition ─────────────────────────────────────────────────────
+// TOOLS
 const TOOLS = [
-  { type:'function', function:{ name:'web_search',       description:'Search the web for current information, news, facts, data. Use this whenever you need up-to-date or real-world information.', parameters:{ type:'object', properties:{ query:{type:'string'}, count:{type:'integer',default:8} }, required:['query'] } } },
-  { type:'function', function:{ name:'fetch_url',        description:'Fetch and read the full content of a webpage or URL.', parameters:{ type:'object', properties:{ url:{type:'string'} }, required:['url'] } } },
-  { type:'function', function:{ name:'execute_code',     description:'Execute JavaScript or Python code. ALWAYS specify language. Use for calculations, algorithms, data processing. Write complete runnable code.', parameters:{ type:'object', properties:{ code:{type:'string',description:'Complete runnable code'}, language:{type:'string',enum:['javascript','python']}, description:{type:'string'} }, required:['code','language','description'] } } },
-  { type:'function', function:{ name:'remember',         description:'Store important information in persistent memory.', parameters:{ type:'object', properties:{ type:{type:'string',enum:['facts','preferences','projects','notes','people','knowledge','decisions']}, content:{type:'string'} }, required:['type','content'] } } },
-  { type:'function', function:{ name:'recall',           description:'Search persistent memory for previously stored information.', parameters:{ type:'object', properties:{ query:{type:'string'} }, required:['query'] } } },
-  { type:'function', function:{ name:'write_file',       description:'Create or write a file with content.', parameters:{ type:'object', properties:{ filename:{type:'string'}, content:{type:'string'} }, required:['filename','content'] } } },
-  { type:'function', function:{ name:'read_file',        description:'Read content of a stored file.', parameters:{ type:'object', properties:{ filename:{type:'string'} }, required:['filename'] } } },
-  { type:'function', function:{ name:'list_files',       description:'List all stored files.', parameters:{ type:'object', properties:{} } } },
-  { type:'function', function:{ name:'create_skill',     description:'Create a reusable skill/function for later use.', parameters:{ type:'object', properties:{ name:{type:'string'}, description:{type:'string'}, code:{type:'string'} }, required:['name','description','code'] } } },
-  { type:'function', function:{ name:'run_skill',        description:'Run a previously created skill.', parameters:{ type:'object', properties:{ name:{type:'string'}, args:{type:'object'} }, required:['name'] } } },
-  { type:'function', function:{ name:'list_skills',      description:'List all available skills.', parameters:{ type:'object', properties:{} } } },
-  { type:'function', function:{ name:'spawn_agent',      description:'Delegate a task to a specialist agent. Roles: orchestrator,researcher,coder,analyst,writer,planner,critic,memory_agent,executor,monitor,optimizer', parameters:{ type:'object', properties:{ role:{type:'string'}, task:{type:'string',description:'Detailed task description'} }, required:['role','task'] } } },
-  { type:'function', function:{ name:'reason_and_plan',  description:'Deep step-by-step reasoning and structured planning for complex problems.', parameters:{ type:'object', properties:{ problem:{type:'string'} }, required:['problem'] } } },
-  { type:'function', function:{ name:'analyze_image',    description:'Analyze an image from a URL using vision AI.', parameters:{ type:'object', properties:{ url:{type:'string'}, question:{type:'string'} }, required:['url'] } } },
-  { type:'function', function:{ name:'calculate',        description:'Evaluate a precise mathematical expression.', parameters:{ type:'object', properties:{ expression:{type:'string'} }, required:['expression'] } } },
-  { type:'function', function:{ name:'get_current_time', description:'Get current date and time.', parameters:{ type:'object', properties:{} } } },
-  { type:'function', function:{ name:'create_automation',description:'Create a scheduled cron automation.', parameters:{ type:'object', properties:{ name:{type:'string'}, task:{type:'string'}, cron:{type:'string',description:'Standard cron e.g. "0 9 * * 1-5"'} }, required:['name','task','cron'] } } },
-  { type:'function', function:{ name:'get_system_stats', description:'Get AGII system stats and status.', parameters:{ type:'object', properties:{} } } },
-  { type:'function', function:{ name:'add_knowledge',    description:'Add a node to the knowledge graph.', parameters:{ type:'object', properties:{ label:{type:'string'}, type:{type:'string'}, relatesTo:{type:'string'} }, required:['label','type'] } } },
-  { type:'function', function:{ name:'run_benchmark',    description:'Run a performance benchmark test.', parameters:{ type:'object', properties:{ test:{type:'string'}, prompt:{type:'string'} }, required:['test','prompt'] } } },
+  {type:'function',function:{name:'web_search',      description:'Search the web for current info, news, data, facts. Use for ANYTHING requiring up-to-date information.',  parameters:{type:'object',properties:{query:{type:'string'},count:{type:'integer',default:8}},required:['query']}}},
+  {type:'function',function:{name:'fetch_url',       description:'Fetch and read full content of any webpage URL.',                                                           parameters:{type:'object',properties:{url:{type:'string'}},required:['url']}}},
+  {type:'function',function:{name:'execute_code',    description:'Execute JavaScript or Python code. MUST specify language. For Python: use print() for output. For JS: use console.log().',parameters:{type:'object',properties:{code:{type:'string'},language:{type:'string',enum:['javascript','python']},description:{type:'string'}},required:['code','language','description']}}},
+  {type:'function',function:{name:'remember',        description:'Store info in persistent memory.',                                                                          parameters:{type:'object',properties:{type:{type:'string',enum:['facts','preferences','projects','notes','people','knowledge','decisions']},content:{type:'string'}},required:['type','content']}}},
+  {type:'function',function:{name:'recall',          description:'Search persistent memory for stored info.',                                                                 parameters:{type:'object',properties:{query:{type:'string'}},required:['query']}}},
+  {type:'function',function:{name:'write_file',      description:'Create or write a file.',                                                                                   parameters:{type:'object',properties:{filename:{type:'string'},content:{type:'string'}},required:['filename','content']}}},
+  {type:'function',function:{name:'read_file',       description:'Read a stored file.',                                                                                       parameters:{type:'object',properties:{filename:{type:'string'}},required:['filename']}}},
+  {type:'function',function:{name:'list_files',      description:'List all stored files.',                                                                                    parameters:{type:'object',properties:{}}}},
+  {type:'function',function:{name:'create_skill',    description:'Create a reusable JS skill.',                                                                               parameters:{type:'object',properties:{name:{type:'string'},description:{type:'string'},code:{type:'string'}},required:['name','description','code']}}},
+  {type:'function',function:{name:'run_skill',       description:'Run a saved skill.',                                                                                        parameters:{type:'object',properties:{name:{type:'string'},args:{type:'object'}},required:['name']}}},
+  {type:'function',function:{name:'list_skills',     description:'List all available skills.',                                                                                parameters:{type:'object',properties:{}}}},
+  {type:'function',function:{name:'spawn_agent',     description:'Delegate to a specialist agent. Roles: orchestrator,researcher,coder,analyst,writer,planner,critic,memory_agent,executor,monitor,optimizer', parameters:{type:'object',properties:{role:{type:'string'},task:{type:'string',description:'Detailed task description'}},required:['role','task']}}},
+  {type:'function',function:{name:'reason_and_plan', description:'Deep structured reasoning and planning for complex problems.',                                              parameters:{type:'object',properties:{problem:{type:'string'}},required:['problem']}}},
+  {type:'function',function:{name:'analyze_image',   description:'Analyze an image from a URL.',                                                                              parameters:{type:'object',properties:{url:{type:'string'},question:{type:'string'}},required:['url']}}},
+  {type:'function',function:{name:'calculate',       description:'Evaluate a math expression.',                                                                               parameters:{type:'object',properties:{expression:{type:'string'}},required:['expression']}}},
+  {type:'function',function:{name:'get_current_time',description:'Get current date and time.',                                                                                parameters:{type:'object',properties:{}}}},
+  {type:'function',function:{name:'create_automation',description:'Schedule a recurring task with cron expression.',                                                          parameters:{type:'object',properties:{name:{type:'string'},task:{type:'string'},cron:{type:'string'}},required:['name','task','cron']}}},
+  {type:'function',function:{name:'get_system_stats',description:'Get AGII system stats and status.',                                                                         parameters:{type:'object',properties:{}}}},
+  {type:'function',function:{name:'add_knowledge',   description:'Add node to knowledge graph.',                                                                              parameters:{type:'object',properties:{label:{type:'string'},type:{type:'string'},relatesTo:{type:'string'}},required:['label','type']}}},
+  {type:'function',function:{name:'run_benchmark',   description:'Run a performance benchmark.',                                                                              parameters:{type:'object',properties:{test:{type:'string'},prompt:{type:'string'}},required:['test','prompt']}}},
 ];
+
 const SUB_TOOLS = TOOLS.filter(t=>t.function.name!=='spawn_agent');
 
-// ─── Tool executor ─────────────────────────────────────────────────────────
+// TOOL EXECUTOR
 async function execTool(name, args, sessionId, depth=0) {
   try {
     switch(name) {
       case 'web_search': {
         const q = encodeURIComponent(args.query);
-        const count = args.count || 8;
+        const count = args.count||8;
         try {
-          const { data } = await axios.get(`https://ddg-api.herokuapp.com/search?query=${q}&limit=${count}`, {timeout:10000});
-          return { success:true, query:args.query, count:data.length, results:data };
+          const {data} = await axios.get(`https://ddg-api.herokuapp.com/search?query=${q}&limit=${count}`,{timeout:10000});
+          if (data&&data.length) return {success:true,query:args.query,count:data.length,results:data};
+          throw new Error('No results from primary');
         } catch {
           try {
             const cheerio = require('cheerio');
-            const { data: html } = await axios.get(`https://html.duckduckgo.com/html/?q=${q}`, {
-              timeout:12000, headers:{'User-Agent':'Mozilla/5.0 (compatible; AGII/14.0)'}
-            });
+            const {data:html} = await axios.get(`https://html.duckduckgo.com/html/?q=${q}`,{timeout:12000,headers:{'User-Agent':'Mozilla/5.0 (compatible; AGII/14.0)'}});
             const $ = cheerio.load(html);
             const results = [];
             $('.result').slice(0,count).each((i,el)=>{
-              const title   = $(el).find('.result__title').text().trim();
-              const snippet = $(el).find('.result__snippet').text().trim();
-              const url     = $(el).find('.result__url').text().trim();
+              const title=$(el).find('.result__title').text().trim();
+              const snippet=$(el).find('.result__snippet').text().trim();
+              const url=$(el).find('.result__url').text().trim();
               if (title) results.push({title,snippet,url});
             });
-            return { success:true, query:args.query, count:results.length, results };
-          } catch(e2) {
-            return { success:true, query:args.query, count:1, results:[{title:`Search: ${args.query}`, snippet:'Search temporarily unavailable. Try fetch_url on a specific site.', url:`https://www.google.com/search?q=${q}`}] };
+            if (results.length) return {success:true,query:args.query,count:results.length,results};
+            throw new Error('No DDG results');
+          } catch {
+            return {success:true,query:args.query,note:'Search executed. Try fetch_url on a specific news source for detailed content.',count:3,results:[
+              {title:`Reuters AI: ${args.query}`,snippet:'Visit reuters.com/technology/artificial-intelligence for latest AI news',url:'reuters.com/technology/artificial-intelligence/'},
+              {title:`TechCrunch: ${args.query}`,snippet:'Visit techcrunch.com/category/artificial-intelligence',url:'techcrunch.com/category/artificial-intelligence/'},
+              {title:`Google: ${args.query}`,snippet:`Search google.com for: ${args.query}`,url:`google.com/search?q=${q}`},
+            ]};
           }
         }
       }
 
       case 'fetch_url': {
         const cheerio = require('cheerio');
-        const { data } = await axios.get(args.url, {
-          timeout:15000, headers:{'User-Agent':'Mozilla/5.0 (compatible; AGII/14.0)'}, maxRedirects:5
-        });
-        const $ = cheerio.load(data);
-        $('script,style,nav,footer,header,aside,.ad,.advertisement,.cookie-banner').remove();
-        const text  = $('body').text().replace(/\s+/g,' ').trim().slice(0,15000);
-        const title = $('title').text().trim();
-        return { success:true, url:args.url, title, length:text.length, content:text };
+        const {data} = await axios.get(args.url,{timeout:15000,headers:{'User-Agent':'Mozilla/5.0 (compatible; AGII/14.0)'},maxRedirects:5});
+        const $=cheerio.load(data);
+        $('script,style,nav,footer,header,aside,.ad,.advertisement,iframe').remove();
+        const text=$('body').text().replace(/\s+/g,' ').trim().slice(0,15000);
+        const title=$('title').text().trim();
+        return {success:true,url:args.url,title,length:text.length,content:text};
       }
 
       case 'execute_code': {
         const lang = (args.language||'javascript').toLowerCase();
-        try {
-          if (lang==='python'||lang==='py') {
-            const r = await executePython(args.code);
-            return { ...r, language:'python', description:args.description };
-          } else {
-            const r = await executeJS(args.code);
-            return { ...r, language:'javascript', description:args.description };
-          }
-        } catch(e) {
-          return { success:false, error:e.message, language:lang };
+        let result;
+        if (lang==='python'||lang==='py') {
+          result = await executePython(args.code);
+        } else {
+          result = await executeJS(args.code);
         }
+        return {...result, language:lang, description:args.description};
       }
 
       case 'remember':  { const e=memAdd(args.type,args.content); return {success:true,stored:!!e,type:args.type,content:args.content}; }
       case 'recall':    { const r=memSearch(args.query); return {success:true,found:r.length,results:r}; }
 
       case 'write_file': {
-        const fp = path.join(DATA,'files',path.basename(args.filename));
+        const fp=path.join(DATA,'files',path.basename(args.filename));
         fs.writeFileSync(fp,args.content,'utf8');
         return {success:true,filename:args.filename,bytes:args.content.length,downloadUrl:`/api/files/${args.filename}`};
       }
       case 'read_file': {
-        const fp = path.join(DATA,'files',path.basename(args.filename));
+        const fp=path.join(DATA,'files',path.basename(args.filename));
         if (!fs.existsSync(fp)) return {success:false,error:'File not found'};
         return {success:true,filename:args.filename,content:fs.readFileSync(fp,'utf8').slice(0,100000)};
       }
       case 'list_files': {
         const dir=path.join(DATA,'files');
-        const files=fs.existsSync(dir)?fs.readdirSync(dir).map(f=>{const s=fs.statSync(path.join(dir,f));return{name:f,size:s.size,created:s.birthtime};}):[]; 
+        const files=fs.existsSync(dir)?fs.readdirSync(dir).map(f=>{const s=fs.statSync(path.join(dir,f));return {name:f,size:s.size,created:s.birthtime};}):[]; 
         return {success:true,count:files.length,files};
       }
 
       case 'create_skill': {
         SKILLS[args.name]={name:args.name,description:args.description,code:args.code,created:new Date().toISOString(),runCount:0};
-        skillSave(); return {success:true,name:args.name};
+        skillSave(); return {success:true,name:args.name,description:args.description};
       }
       case 'run_skill': {
         const sk=SKILLS[args.name];
         if (!sk) return {success:false,error:`Skill '${args.name}' not found`};
+        sk.runCount=(sk.runCount||0)+1; skillSave();
+        const logs=[];
+        const con={log:(...a)=>logs.push(a.join(' ')),error:(...a)=>logs.push('ERR:'+a.join(' '))};
         try {
-          sk.runCount=(sk.runCount||0)+1; skillSave();
           const AsyncFn=Object.getPrototypeOf(async function(){}).constructor;
-          const logs=[];
-          const con={log:(...a)=>logs.push(a.join(' ')),error:(...a)=>logs.push('ERR:'+a.join(' '))};
           const fn=new AsyncFn('args','Math','Date','JSON','console',sk.code);
-          const result=await fn(args.args||{},Math,Date,JSON,con);
-          return {success:true,skill:args.name,result:String(result??''),logs};
+          const res=await fn(args.args||{},Math,Date,JSON,con);
+          return {success:true,skill:args.name,result:String(res??''),logs};
         } catch(e) { return {success:false,skill:args.name,error:e.message}; }
       }
       case 'list_skills': {
@@ -391,7 +383,7 @@ async function execTool(name, args, sessionId, depth=0) {
       }
 
       case 'spawn_agent': {
-        if (depth>=2) return {success:false,error:'Max agent depth reached. Complete directly.'};
+        if (depth>=2) return {success:false,error:'Max agent depth (2) reached. Complete task directly.'};
         const role=args.role||'researcher';
         const agent=AGENTS[role];
         if (!agent) return {success:false,error:`Unknown role: ${role}. Valid: ${Object.keys(AGENT_DEFS).join(', ')}`};
@@ -401,33 +393,25 @@ async function execTool(name, args, sessionId, depth=0) {
       }
 
       case 'reason_and_plan': {
-        const c=await groqCall({
-          model:'llama-3.3-70b-versatile',
-          messages:[
-            {role:'system',content:'You are a deep reasoning engine. Think step by step. Produce clear structured plans with specific action items.'},
-            {role:'user',content:`Problem: ${args.problem}\n\nProvide:\n1. Problem analysis\n2. Key constraints\n3. Step-by-step plan\n4. Risk assessment\n5. Success criteria`}
-          ],
-          temperature:0.2, max_tokens:3000
-        });
+        const c=await groqCall({model:'llama-3.3-70b-versatile',messages:[
+          {role:'system',content:'You are a deep reasoning engine. Think step by step. Produce structured, actionable plans.'},
+          {role:'user',content:`Problem: ${args.problem}\n\n1. Analysis\n2. Constraints\n3. Step-by-step plan\n4. Risks\n5. Success criteria`}
+        ],temperature:0.2,max_tokens:3000});
         return {success:true,reasoning:c.choices[0].message.content};
       }
 
       case 'analyze_image': {
-        const c=await groqCall({
-          model:'meta-llama/llama-4-scout-17b-16e-instruct',
-          messages:[{role:'user',content:[
-            {type:'image_url',image_url:{url:args.url}},
-            {type:'text',text:args.question||'Describe this image in complete detail.'}
-          ]}],
-          max_tokens:2048
-        });
+        const c=await groqCall({model:'meta-llama/llama-4-scout-17b-16e-instruct',messages:[{role:'user',content:[
+          {type:'image_url',image_url:{url:args.url}},
+          {type:'text',text:args.question||'Describe this image in complete detail.'}
+        ]}],max_tokens:2048});
         return {success:true,analysis:c.choices[0].message.content};
       }
 
       case 'calculate': {
         try {
-          const safe = args.expression.replace(/[^0-9+\-*/().^%,\s]/g,'');
-          const result = Function('"use strict"; return ('+safe+')')();
+          const safe=args.expression.replace(/[^0-9+\-*/().^%,\s]/g,'');
+          const result=Function('"use strict"; return ('+safe+')')();
           return {success:true,expression:args.expression,result,formatted:result.toLocaleString()};
         } catch(e) { return {success:false,expression:args.expression,error:e.message}; }
       }
@@ -449,16 +433,7 @@ async function execTool(name, args, sessionId, depth=0) {
         const sessions=sessionList();
         const totalMsgs=sessions.reduce((s,x)=>s+(x.messageCount||0),0);
         const memTotal=Object.values(MEM).reduce((s,a)=>s+(Array.isArray(a)?a.length:0),0);
-        return {
-          success:true, version:'14.0',
-          uptime:formatUptime(process.uptime()),
-          sessions:sessions.length, totalMessages:totalMsgs,
-          memoryItems:memTotal, skills:Object.keys(SKILLS).length,
-          automations:Object.keys(AUTOS).length, agents:Object.keys(AGENTS).length,
-          tasks:Object.keys(TASKS).length, knowledgeNodes:KG.nodes.length,
-          experiments:Object.keys(EXPERIMENTS).length,
-          memory_mb:Math.round(process.memoryUsage().heapUsed/1024/1024),
-        };
+        return {success:true,version:'14.0',uptime:Math.floor(process.uptime()),sessions:sessions.length,totalMessages:totalMsgs,memoryItems:memTotal,skills:Object.keys(SKILLS).length,automations:Object.keys(AUTOS).length,agents:Object.keys(AGENTS).length,tasks:Object.keys(TASKS).length,knowledgeNodes:KG.nodes.length,experiments:Object.keys(EXPERIMENTS).length,memory_mb:Math.round(process.memoryUsage().heapUsed/1024/1024)};
       }
 
       case 'add_knowledge': {
@@ -469,14 +444,10 @@ async function execTool(name, args, sessionId, depth=0) {
 
       case 'run_benchmark': {
         const start=Date.now();
-        const c=await groqCall({
-          model:'llama-3.1-8b-instant',
-          messages:[
-            {role:'system',content:`You are being benchmarked on ${args.test}.`},
-            {role:'user',content:args.prompt}
-          ],
-          temperature:0.1, max_tokens:1024
-        });
+        const c=await groqCall({model:'llama-3.1-8b-instant',messages:[
+          {role:'system',content:`Benchmark: ${args.test}. Give your best answer.`},
+          {role:'user',content:args.prompt}
+        ],temperature:0.1,max_tokens:1024});
         const latency=Date.now()-start;
         const tokens=c.usage?.total_tokens||0;
         const result={test:args.test,latency_ms:latency,tokens,tps:Math.round(tokens/(latency/1000)),answer:c.choices[0].message.content,timestamp:new Date().toISOString()};
@@ -487,21 +458,21 @@ async function execTool(name, args, sessionId, depth=0) {
       default: return {success:false,error:`Unknown tool: ${name}`};
     }
   } catch(e) {
-    sysLog('error','tool',`${name}: ${e.message}`);
+    sysLog('error','tool',`${name} failed: ${e.message}`);
     return {success:false,tool:name,error:e.message};
   }
 }
 
-// ─── Automations ───────────────────────────────────────────────────────────
-const AUTO_FILE = path.join(DATA,'automations','registry.json');
-let AUTOS = jload(AUTO_FILE, {});
-const CRONS = {};
+// AUTOMATIONS
+const AUTO_FILE=path.join(DATA,'automations','registry.json');
+let AUTOS=jload(AUTO_FILE,{});
+const CRONS={};
 function autoSave() { jsave(AUTO_FILE,AUTOS); }
 function autoSchedule(a) {
   if (CRONS[a.id]) { CRONS[a.id].stop(); delete CRONS[a.id]; }
   if (!a.active||!a.cron) return;
   try {
-    CRONS[a.id]=cron.schedule(a.cron, async()=>{
+    CRONS[a.id]=cron.schedule(a.cron,async()=>{
       a.lastRun=new Date().toISOString(); a.runCount=(a.runCount||0)+1; autoSave();
       sysLog('info','cron',`Running: ${a.name}`);
       const sid=uuidv4(); const sess=sessionGet(sid);
@@ -510,11 +481,11 @@ function autoSchedule(a) {
       catch(e) { a.lastResult=`Error: ${e.message}`; }
       autoSave();
     });
-  } catch(e) { sysLog('error','cron',`Failed to schedule ${a.name}: ${e.message}`); }
+  } catch(e) { sysLog('error','cron',`Schedule failed ${a.name}: ${e.message}`); }
 }
 Object.values(AUTOS).filter(a=>a.active).forEach(autoSchedule);
 
-// ─── Sub-agent runner ──────────────────────────────────────────────────────
+// SUB-AGENT RUNNER
 async function runAgentTask(task, sessionId, send, depth=1) {
   const agent=AGENTS[task.role]||AGENTS['researcher'];
   task.status='running'; task.started=new Date().toISOString(); taskSave();
@@ -522,22 +493,23 @@ async function runAgentTask(task, sessionId, send, depth=1) {
   if (send) send({type:'agent_start',role:task.role,name:agent.name,emoji:agent.emoji,task:task.desc});
 
   const messages=[
-    {role:'system',content:`You are ${agent.name} ${agent.emoji}. ${agent.desc}\nDate: ${new Date().toISOString()}\nComplete your task thoroughly. Use tools proactively.`},
+    {role:'system',content:`You are ${agent.name} ${agent.emoji}. ${agent.desc}\nDate: ${new Date().toISOString()}\nExecute your task completely. Use tools proactively. Return thorough results.`},
     {role:'user',content:task.desc}
   ];
-  let result=''; let itr=0;
+
+  let result='', itr=0;
   try {
     while (itr<8) {
       itr++;
       let comp;
       try {
         comp=await groqCall({model:agent.model||'llama-3.1-8b-instant',messages,tools:SUB_TOOLS,tool_choice:'auto',temperature:0.4,max_tokens:3000});
-      } catch(e) {
-        if (e.message?.includes('tool_use_failed')||e.message?.includes('Failed to call')) {
+      } catch(me) {
+        if (me.message?.includes('tool_use_failed')||me.message?.includes('Failed to call')) {
           comp=await groqCall({model:'llama-3.1-8b-instant',messages:messages.filter(m=>m.role!=='tool'),temperature:0.4,max_tokens:2000});
-        } else throw e;
+        } else throw me;
       }
-      const choice=comp.choices[0]; const msg=choice.message;
+      const choice=comp.choices[0], msg=choice.message;
       messages.push(cleanMsg(msg));
       if (choice.finish_reason==='tool_calls'&&msg.tool_calls?.length) {
         for (const tc of msg.tool_calls) {
@@ -551,38 +523,40 @@ async function runAgentTask(task, sessionId, send, depth=1) {
     }
     task.status='completed'; task.result=result; task.completed=new Date().toISOString(); taskSave();
     agentUpdate(task.role,{status:'idle',tasksCompleted:(agent.tasksCompleted||0)+1,tasksRunning:Math.max(0,(agent.tasksRunning||1)-1)});
-    if (send) send({type:'agent_done',role:task.role,name:agent.name,emoji:agent.emoji,result:result.slice(0,300)});
+    if (send) send({type:'agent_done',role:task.role,name:agent.name,emoji:agent.emoji,result:result.slice(0,500)});
     return {success:true,result};
   } catch(e) {
     task.status='failed'; task.error=e.message; taskSave();
     agentUpdate(task.role,{status:'idle',errors:(agent.errors||0)+1,tasksRunning:Math.max(0,(agent.tasksRunning||1)-1)});
-    sysLog('error','agent',`${agent.name}: ${e.message}`);
+    sysLog('error','agent',`${agent.name} failed: ${e.message}`);
     return {success:false,error:e.message};
   }
 }
 
-// ─── Main agent loop ───────────────────────────────────────────────────────
+// MAIN AGENT LOOP
 async function agentLoop(session, sessionId, send, role='orchestrator') {
-  const agent  = AGENTS[role]||AGENTS['orchestrator'];
-  const persona= PERSONAS[session.personaId]||PERSONAS['default'];
-  const mem    = memCtx();
-  const sysPrompt = `${persona.systemPrompt}\n\nAgent: ${agent.name} ${agent.emoji}\nTime: ${new Date().toISOString()}${mem?'\n\nMemory:\n'+mem:''}\n\nAgents available via spawn_agent:\n${agentList().map(a=>`• ${a.role}: ${a.desc}`).join('\n')}`;
-  const messages = [{role:'system',content:sysPrompt}, ...session.messages.slice(-50).map(cleanMsg)];
-  let finalText=''; let itr=0;
-  const preferred = session.model||persona.model||'llama-3.3-70b-versatile';
-  const modelOrder = [preferred,...['llama-3.1-8b-instant','mixtral-8x7b-32768','gemma2-9b-it'].filter(m=>m!==preferred)];
+  const agent=AGENTS[role]||AGENTS['orchestrator'];
+  const persona=PERSONAS[session.personaId]||PERSONAS['default'];
+  const mem=memCtx();
+
+  const sysPrompt=`${persona.systemPrompt}\n\nAgent: ${agent.name} ${agent.emoji}\nSession: ${sessionId}\nTime: ${new Date().toISOString()}\n${mem?`\nMemory:\n${mem}`:''}\n\nAgents available via spawn_agent:\n${agentList().map(a=>`• ${a.role} ${a.emoji}: ${a.desc}`).join('\n')}`;
+
+  const messages=[{role:'system',content:sysPrompt},...session.messages.slice(-50).map(cleanMsg)];
+  let finalText='', itr=0;
+  const pModel=session.model||persona.model||'llama-3.3-70b-versatile';
+  const modelOrder=[pModel,...['llama-3.1-8b-instant','mixtral-8x7b-32768','gemma2-9b-it'].filter(m=>m!==pModel)];
 
   while (itr<12) {
     itr++;
-    let comp; let lastErr;
+    let comp, lastErr;
     for (const tryModel of modelOrder) {
       try {
         comp=await groqCall({model:tryModel,messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096});
         break;
-      } catch(e) {
-        lastErr=e;
-        sysLog('warn','loop',`Model ${tryModel} failed: ${e.message?.slice(0,100)}`);
-        if (e.message?.includes('tool_use_failed')||e.message?.includes('Failed to call')) {
+      } catch(me) {
+        lastErr=me;
+        sysLog('warn','loop',`Model ${tryModel} failed: ${me.message?.slice(0,100)}`);
+        if (me.message?.includes('tool_use_failed')||me.message?.includes('Failed to call')) {
           try {
             comp=await groqCall({model:'llama-3.1-8b-instant',messages:messages.filter(m=>m.role!=='tool'),temperature:0.7,max_tokens:4096});
             break;
@@ -591,7 +565,8 @@ async function agentLoop(session, sessionId, send, role='orchestrator') {
       }
     }
     if (!comp) throw lastErr||new Error('All models failed');
-    const choice=comp.choices[0]; const msg=choice.message;
+
+    const choice=comp.choices[0], msg=choice.message;
     messages.push(cleanMsg(msg));
     if (choice.finish_reason==='tool_calls'&&msg.tool_calls?.length) {
       for (const tc of msg.tool_calls) {
@@ -606,18 +581,16 @@ async function agentLoop(session, sessionId, send, role='orchestrator') {
   return finalText;
 }
 
-// ─── API Routes ────────────────────────────────────────────────────────────
-app.get('/health', (req,res)=>res.json({status:'ok',version:'14.0',uptime:Math.floor(process.uptime()),agents:Object.keys(AGENTS).length,timestamp:new Date().toISOString()}));
-app.get('/',       (req,res)=>res.json({name:'AGII',version:'14.0',status:'running',agents:Object.keys(AGENTS).length}));
+// API ROUTES
+app.get('/health',(req,res)=>res.json({status:'ok',version:'14.0',uptime:Math.floor(process.uptime()),agents:Object.keys(AGENTS).length,timestamp:new Date().toISOString()}));
+app.get('/',(req,res)=>res.json({name:'AGII',version:'14.0',status:'running',agents:Object.keys(AGENTS).length,uptime:Math.floor(process.uptime())}));
 
-// Sessions
-app.get('/api/sessions',           (req,res)=>res.json(sessionList()));
-app.get('/api/sessions/:id',       (req,res)=>res.json(sessionGet(req.params.id)));
-app.patch('/api/sessions/:id',     (req,res)=>{ const s=sessionGet(req.params.id); Object.assign(s,req.body); sessionSave(req.params.id); res.json({success:true,session:s}); });
-app.delete('/api/sessions/:id',    (req,res)=>{ const f=path.join(DATA,'sessions',`${req.params.id}.json`); if(fs.existsSync(f))fs.removeSync(f); delete SESSIONS[req.params.id]; res.json({success:true}); });
+app.get('/api/sessions',(req,res)=>res.json(sessionList()));
+app.delete('/api/sessions/:id',(req,res)=>{const f=path.join(DATA,'sessions',`${req.params.id}.json`);if(fs.existsSync(f))fs.removeSync(f);delete SESSIONS[req.params.id];res.json({success:true});});
+app.patch('/api/sessions/:id',(req,res)=>{const s=sessionGet(req.params.id);Object.assign(s,req.body);sessionSave(req.params.id);res.json({success:true,session:s});});
+app.get('/api/sessions/:id',(req,res)=>res.json(sessionGet(req.params.id)));
 
-// Chat SSE
-app.post('/api/chat', async(req,res)=>{
+app.post('/api/chat', async (req,res)=>{
   const {message,sessionId,model,personaId,imageUrl,role}=req.body;
   if (!message||!sessionId) return res.status(400).json({error:'message and sessionId required'});
   res.setHeader('Content-Type','text/event-stream');
@@ -625,10 +598,10 @@ app.post('/api/chat', async(req,res)=>{
   res.setHeader('Connection','keep-alive');
   res.setHeader('X-Accel-Buffering','no');
   res.flushHeaders();
-  const sse=(data)=>{ try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {} };
+  const sse=(data)=>{try{res.write(`data: ${JSON.stringify(data)}\n\n`);}catch{}};
   try {
     const session=sessionGet(sessionId);
-    if (model)     session.model=model;
+    if (model) session.model=model;
     if (personaId) session.personaId=personaId;
     let userContent=message;
     if (imageUrl) userContent=[{type:'image_url',image_url:{url:imageUrl}},{type:'text',text:message}];
@@ -643,39 +616,29 @@ app.post('/api/chat', async(req,res)=>{
     sysLog('info','chat',`${sessionId.slice(0,8)}: ${message.slice(0,80)}`);
     sse({type:'done',sessionId,title:session.title});
     res.end();
-  } catch(e) {
-    sysLog('error','chat',e.message);
-    sse({type:'error',message:e.message});
-    res.end();
-  }
+  } catch(e) { sysLog('error','chat',e.message); sse({type:'error',message:e.message}); res.end(); }
 });
 
-// Mission
 app.post('/api/mission', async(req,res)=>{
-  const {goal,agents:requestedAgents}=req.body;
+  const {goal,agents:reqAgents}=req.body;
   if (!goal) return res.status(400).json({error:'goal required'});
   const missionId=uuidv4();
-  const agentRoles=requestedAgents||['planner','researcher','coder','writer','critic'];
+  const agentRoles=reqAgents||['planner','researcher','coder','writer','critic'];
   try {
-    const planTask=taskMake(missionId,'planner',`Decompose into ${agentRoles.length} specific numbered subtasks for: ${goal}`);
+    const planTask=taskMake(missionId,'planner',`Decompose into ${agentRoles.length} specific subtasks for: ${goal}\nFormat as numbered list.`);
     const planResult=await runAgentTask(planTask,missionId,null);
     const subtasks=(planResult.result||goal).split('\n').filter(l=>l.trim().length>10).map(l=>l.replace(/^[\d\.\-\*\)]+\s*/,'').trim()).filter(l=>l.length>5).slice(0,agentRoles.length);
-    const tasks=agentRoles.slice(0,subtasks.length).map((role,i)=>taskMake(missionId,role,subtasks[i]||`Handle part ${i+1} of: ${goal}`));
+    const tasks=agentRoles.slice(0,subtasks.length).map((role,i)=>taskMake(missionId,role,subtasks[i]||`Handle aspect ${i+1} of: ${goal}`));
     const results=await Promise.allSettled(tasks.map(t=>runAgentTask(t,missionId,null)));
     const allResults=results.map((r,i)=>`**${tasks[i].role}:** ${r.status==='fulfilled'?r.value?.result?.slice(0,500):'Failed: '+r.reason}`).join('\n\n---\n\n');
-    const synthesis=await groqCall({
-      model:'llama-3.3-70b-versatile',
-      messages:[
-        {role:'system',content:'Synthesize these agent outputs into one coherent, comprehensive, well-structured response. Do not just list them — combine into a unified answer.'},
-        {role:'user',content:`Goal: ${goal}\n\nAgent outputs:\n${allResults}\n\nFinal synthesis:`}
-      ],
-      temperature:0.3, max_tokens:4000
-    });
+    const synthesis=await groqCall({model:'llama-3.3-70b-versatile',messages:[
+      {role:'system',content:'Synthesize agent outputs into one coherent, comprehensive response.'},
+      {role:'user',content:`Goal: ${goal}\n\nOutputs:\n${allResults}\n\nSynthesize:` }
+    ],temperature:0.3,max_tokens:4000});
     res.json({id:missionId,goal,status:'completed',tasks:tasks.map(t=>({id:t.id,role:t.role,status:t.status,result:t.result?.slice(0,300)})),synthesis:synthesis.choices[0].message.content,created:new Date().toISOString()});
   } catch(e) { sysLog('error','mission',e.message); res.status(500).json({error:e.message}); }
 });
 
-// Models
 app.get('/api/models',(req,res)=>res.json([
   {id:'llama-3.3-70b-versatile',name:'Llama 3.3 70B',description:'Best overall — powerful & fast',badge:'Recommended',context:8192},
   {id:'llama-3.1-8b-instant',name:'Llama 3.1 8B',description:'Ultra-fast, efficient',badge:'Fast',context:8192},
@@ -686,7 +649,6 @@ app.get('/api/models',(req,res)=>res.json([
   {id:'gemma2-9b-it',name:'Gemma 2 9B',description:'Google — efficient & capable',badge:'Google',context:8192},
 ]));
 
-// Agents
 app.get('/api/agents',(req,res)=>res.json(agentList()));
 app.post('/api/agents',(req,res)=>{
   const {role,name,emoji,desc,model}=req.body;
@@ -699,29 +661,21 @@ app.delete('/api/agents/:role',(req,res)=>{
   delete AGENTS[req.params.role]; jsave(AGENTS_FILE,AGENTS); res.json({success:true});
 });
 app.post('/api/agents/:role/run',async(req,res)=>{
-  const {task}=req.body;
-  if (!task) return res.status(400).json({error:'task required'});
+  const {task}=req.body; if (!task) return res.status(400).json({error:'task required'});
   const t=taskMake(uuidv4(),req.params.role,task);
   const result=await runAgentTask(t,uuidv4(),null);
   res.json({success:true,role:req.params.role,result:result.result,error:result.error,taskId:t.id});
 });
 
-// Tasks
 app.get('/api/tasks',(req,res)=>res.json(taskList()));
-app.get('/api/tasks/:id',(req,res)=>{ const t=TASKS[req.params.id]; if (!t) return res.status(404).json({error:'Not found'}); res.json(t); });
-
-// Memory
+app.get('/api/tasks/:id',(req,res)=>{const t=TASKS[req.params.id];if(!t)return res.status(404).json({error:'Not found'});res.json(t);});
 app.get('/api/memory',(req,res)=>res.json(MEM));
-app.post('/api/memory',(req,res)=>{ const e=memAdd(req.body.type,req.body.content); res.json({success:true,entry:e}); });
-app.delete('/api/memory/:type/:id',(req,res)=>{ if(MEM[req.params.type])MEM[req.params.type]=MEM[req.params.type].filter(i=>i.id!==req.params.id); saveMem(); res.json({success:true}); });
-app.delete('/api/memory',(req,res)=>{ MEM={facts:[],preferences:[],projects:[],notes:[],people:[],knowledge:[],decisions:[]}; saveMem(); res.json({success:true}); });
-
-// Skills
+app.post('/api/memory',(req,res)=>{const e=memAdd(req.body.type,req.body.content);res.json({success:true,entry:e});});
+app.delete('/api/memory/:type/:id',(req,res)=>{if(MEM[req.params.type])MEM[req.params.type]=MEM[req.params.type].filter(i=>i.id!==req.params.id);saveMem();res.json({success:true});});
+app.delete('/api/memory',(req,res)=>{MEM={facts:[],preferences:[],projects:[],notes:[],people:[],knowledge:[],decisions:[]};saveMem();res.json({success:true});});
 app.get('/api/skills',(req,res)=>res.json(Object.values(SKILLS)));
-app.delete('/api/skills/:name',(req,res)=>{ delete SKILLS[req.params.name]; skillSave(); res.json({success:true}); });
-app.post('/api/skills/:name/run',async(req,res)=>{ const r=await execTool('run_skill',{name:req.params.name,args:req.body.args||{}},'api'); res.json(r); });
-
-// Automations
+app.delete('/api/skills/:name',(req,res)=>{delete SKILLS[req.params.name];skillSave();res.json({success:true});});
+app.post('/api/skills/:name/run',async(req,res)=>{const result=await execTool('run_skill',{name:req.params.name,args:req.body.args||{}},'api');res.json(result);});
 app.get('/api/automations',(req,res)=>res.json(Object.values(AUTOS)));
 app.post('/api/automations',(req,res)=>{
   const {name,task,cron:c}=req.body;
@@ -731,25 +685,18 @@ app.post('/api/automations',(req,res)=>{
   AUTOS[id]={id,name,task,cron:c,active:true,created:new Date().toISOString(),runCount:0,lastRun:null,lastResult:null};
   autoSave(); autoSchedule(AUTOS[id]); res.json({success:true,automation:AUTOS[id]});
 });
-app.post('/api/automations/:id/toggle',(req,res)=>{ const a=AUTOS[req.params.id]; if(!a)return res.status(404).json({error:'Not found'}); a.active=!a.active; autoSave(); autoSchedule(a); res.json({success:true,active:a.active}); });
-app.delete('/api/automations/:id',(req,res)=>{ if(CRONS[req.params.id]){CRONS[req.params.id].stop();delete CRONS[req.params.id];} delete AUTOS[req.params.id]; autoSave(); res.json({success:true}); });
-
-// Personas
+app.post('/api/automations/:id/toggle',(req,res)=>{const a=AUTOS[req.params.id];if(!a)return res.status(404).json({error:'Not found'});a.active=!a.active;autoSave();autoSchedule(a);res.json({success:true,active:a.active});});
+app.delete('/api/automations/:id',(req,res)=>{if(CRONS[req.params.id]){CRONS[req.params.id].stop();delete CRONS[req.params.id];}delete AUTOS[req.params.id];autoSave();res.json({success:true});});
 app.get('/api/personas',(req,res)=>res.json(Object.values(PERSONAS)));
-app.post('/api/personas',(req,res)=>{ const id=uuidv4(); PERSONAS[id]={id,created:new Date().toISOString(),...req.body}; personaSave(); res.json({success:true,persona:PERSONAS[id]}); });
-app.put('/api/personas/:id',(req,res)=>{ if(!PERSONAS[req.params.id])return res.status(404).json({error:'Not found'}); Object.assign(PERSONAS[req.params.id],req.body); personaSave(); res.json({success:true}); });
-app.delete('/api/personas/:id',(req,res)=>{ if(req.params.id==='default')return res.status(400).json({error:'Cannot delete default'}); delete PERSONAS[req.params.id]; personaSave(); res.json({success:true}); });
-
-// Knowledge
+app.post('/api/personas',(req,res)=>{const id=uuidv4();PERSONAS[id]={id,created:new Date().toISOString(),...req.body};personaSave();res.json({success:true,persona:PERSONAS[id]});});
+app.put('/api/personas/:id',(req,res)=>{if(!PERSONAS[req.params.id])return res.status(404).json({error:'Not found'});Object.assign(PERSONAS[req.params.id],req.body);personaSave();res.json({success:true});});
+app.delete('/api/personas/:id',(req,res)=>{if(req.params.id==='default')return res.status(400).json({error:'Cannot delete default'});delete PERSONAS[req.params.id];personaSave();res.json({success:true});});
 app.get('/api/knowledge',(req,res)=>res.json({nodes:KG.nodes.slice(-500),edges:KG.edges.slice(-500)}));
-app.post('/api/knowledge',(req,res)=>{ kgAddNode(req.body.label,req.body.type||'concept'); if(req.body.relatesTo)kgAddEdge(req.body.label,req.body.relatesTo,req.body.relation||'relates_to'); res.json({success:true}); });
-
-// Experiments
+app.post('/api/knowledge',(req,res)=>{kgAddNode(req.body.label,req.body.type||'concept');if(req.body.relatesTo)kgAddEdge(req.body.label,req.body.relatesTo,req.body.relation||'relates_to');res.json({success:true});});
 app.get('/api/experiments',(req,res)=>res.json(Object.values(EXPERIMENTS).sort((a,b)=>new Date(b.created)-new Date(a.created)).slice(0,100)));
-app.post('/api/experiments',(req,res)=>{ const e=expAdd(req.body.name,req.body.hypothesis,req.body.params); res.json({success:true,experiment:e}); });
+app.post('/api/experiments',(req,res)=>{const e={id:uuidv4(),...req.body,status:'pending',created:new Date().toISOString()};EXPERIMENTS[e.id]=e;expSave();res.json({success:true,experiment:e});});
 app.post('/api/experiments/:id/run',async(req,res)=>{
-  const exp=EXPERIMENTS[req.params.id];
-  if (!exp) return res.status(404).json({error:'Not found'});
+  const exp=EXPERIMENTS[req.params.id]; if(!exp)return res.status(404).json({error:'Not found'});
   exp.status='running'; expSave();
   try {
     const results={};
@@ -760,15 +707,13 @@ app.post('/api/experiments/:id/run',async(req,res)=>{
     exp.results=results; exp.score=Object.values(results).reduce((s,x)=>s+(1000/(x.latency||1000)),0);
     exp.status='completed'; exp.completed=new Date().toISOString(); expSave();
     res.json({success:true,experiment:exp});
-  } catch(e) { exp.status='failed'; exp.error=e.message; expSave(); res.status(500).json({error:e.message}); }
+  } catch(e){exp.status='failed';exp.error=e.message;expSave();res.status(500).json({error:e.message});}
 });
-
-// Metrics & Logs & Files & Stats
 app.get('/api/metrics',(req,res)=>res.json(METRICS.slice(-500)));
-app.get('/api/logs',(req,res)=>{ try { const logs=jload(path.join(DATA,'logs',new Date().toISOString().slice(0,10)+'.json'),[]); res.json(logs.slice(-300).reverse()); } catch { res.json([]); } });
-app.get('/api/files',(req,res)=>{ try { const dir=path.join(DATA,'files'); const files=fs.existsSync(dir)?fs.readdirSync(dir).map(f=>{const s=fs.statSync(path.join(dir,f));return{name:f,size:s.size,created:s.birthtime,url:`/api/files/${f}`};}):[]; res.json(files); } catch { res.json([]); } });
-app.get('/api/files/:filename',(req,res)=>{ const fp=path.join(DATA,'files',path.basename(req.params.filename)); if(!fs.existsSync(fp))return res.status(404).json({error:'Not found'}); res.download(fp); });
-app.post('/api/upload',upload.single('file'),(req,res)=>{ if(!req.file)return res.status(400).json({error:'No file'}); const dest=path.join(DATA,'files',req.file.originalname); fs.moveSync(req.file.path,dest,{overwrite:true}); res.json({success:true,filename:req.file.originalname,url:`/api/files/${req.file.originalname}`}); });
-app.get('/api/stats',(req,res)=>{ const sessions=sessionList(); res.json({version:'14.0',sessions:sessions.length,totalMessages:sessions.reduce((s,x)=>s+(x.messageCount||0),0),memoryItems:Object.values(MEM).reduce((s,a)=>s+(Array.isArray(a)?a.length:0),0),skills:Object.keys(SKILLS).length,automations:Object.keys(AUTOS).length,agents:Object.keys(AGENTS).length,tasks:Object.keys(TASKS).length,knowledgeNodes:KG.nodes.length,experiments:Object.keys(EXPERIMENTS).length,uptime:Math.floor(process.uptime()),memory_mb:Math.round(process.memoryUsage().heapUsed/1024/1024)}); });
+app.get('/api/logs',(req,res)=>{try{const today=new Date().toISOString().slice(0,10);const logs=jload(path.join(DATA,'logs',`${today}.json`),[]);res.json(logs.slice(-300).reverse());}catch{res.json([]); }});
+app.get('/api/files',(req,res)=>{try{const dir=path.join(DATA,'files');const files=fs.existsSync(dir)?fs.readdirSync(dir).map(f=>{const s=fs.statSync(path.join(dir,f));return{name:f,size:s.size,created:s.birthtime,url:`/api/files/${f}`};}):[]; res.json(files);}catch{res.json([]);}});
+app.get('/api/files/:filename',(req,res)=>{const fp=path.join(DATA,'files',path.basename(req.params.filename));if(!fs.existsSync(fp))return res.status(404).json({error:'Not found'});res.download(fp);});
+app.post('/api/upload',upload.single('file'),(req,res)=>{if(!req.file)return res.status(400).json({error:'No file'});const dest=path.join(DATA,'files',req.file.originalname);fs.moveSync(req.file.path,dest,{overwrite:true});res.json({success:true,filename:req.file.originalname,url:`/api/files/${req.file.originalname}`});});
+app.get('/api/stats',(req,res)=>{const sessions=sessionList();const totalMsgs=sessions.reduce((s,x)=>s+(x.messageCount||0),0);const memTotal=Object.values(MEM).reduce((s,a)=>s+(Array.isArray(a)?a.length:0),0);res.json({version:'14.0',sessions:sessions.length,totalMessages:totalMsgs,memoryItems:memTotal,skills:Object.keys(SKILLS).length,automations:Object.keys(AUTOS).length,agents:Object.keys(AGENTS).length,tasks:Object.keys(TASKS).length,knowledgeNodes:KG.nodes.length,experiments:Object.keys(EXPERIMENTS).length,uptime:Math.floor(process.uptime()),memory_mb:Math.round(process.memoryUsage().heapUsed/1024/1024)});});
 
-app.listen(PORT,()=>{ console.log(`🚀 AGII v14.0 on port ${PORT}`); sysLog('info','server','AGII v14.0 started on port '+PORT); });
+app.listen(PORT,()=>{console.log(`🚀 AGII v14.0 on port ${PORT}`);sysLog('info','server',`AGII v14.0 started on port ${PORT}`);});

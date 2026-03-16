@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   AGII v13.2 — Production AI Agent Platform
+   AGII v13.3 — Production AI Agent Platform
    Multi-agent orchestration, persistent memory, real tools, self-improvement
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -33,21 +33,22 @@ let groqActive  = 0;
 const MAX_CONCURRENT = 2;
 
 async function groqCall(params, retries = 4) {
-  // Wait for a slot
+  // Wait for a concurrency slot
   while (groqActive >= MAX_CONCURRENT) await new Promise(r => setTimeout(r, 200));
   groqActive++;
   try {
-    return await groqCall(params);
+    // Actual Groq API call
+    const result = await groq.chat.completions.create(params);
+    return result;
   } catch(e) {
-    const msg = e?.message || '';
-    if (msg.includes('429') || msg.includes('rate_limit')) {
-      if (retries <= 0) throw e;
-      // Extract wait time from error or default to 15s
-      const waitMatch = msg.match(/try again in ([0-9.]+)s/);
-      const wait = waitMatch ? Math.ceil(parseFloat(waitMatch[1]) * 1000) + 500 : 15000;
-      sysLog('warn', 'groq', `Rate limited — waiting ${wait}ms, retries left: ${retries}`);
+    const msg = e?.message || String(e);
+    if ((msg.includes('429') || msg.includes('rate_limit_exceeded')) && retries > 0) {
+      // Parse the exact wait time from Groq error message
+      const waitMatch = msg.match(/try again in ([0-9.]+)s/i);
+      const wait = waitMatch ? Math.ceil(parseFloat(waitMatch[1]) * 1000) + 1000 : 12000;
+      sysLog('warn', 'groq', `Rate limited on ${params.model} — waiting ${Math.round(wait/1000)}s (retries: ${retries})`);
+      groqActive = Math.max(0, groqActive - 1); // release slot while waiting
       await new Promise(r => setTimeout(r, wait));
-      groqActive--; // release slot during wait
       return await groqCall(params, retries - 1);
     }
     throw e;
@@ -472,7 +473,7 @@ async function execTool(name, args, sessionId, depth = 0) {
           memoryItems: memTotal, skills: Object.keys(SKILLS).length,
           automations: Object.keys(AUTOS).length, agents: Object.keys(AGENTS).length,
           tasks: Object.keys(TASKS).length, knowledgeNodes: KG.nodes.length,
-          uptime: Math.floor(process.uptime()), version: '13.2'
+          uptime: Math.floor(process.uptime()), version: '13.3'
         };
       }
 
@@ -662,7 +663,7 @@ Always use tools when they add value. For multi-step work, delegate to agents.`;
 
 // Health
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '13.2', uptime: Math.floor(process.uptime()), agents: Object.keys(AGENTS).length, timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '13.3', uptime: Math.floor(process.uptime()), agents: Object.keys(AGENTS).length, timestamp: new Date().toISOString() });
 });
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
@@ -963,12 +964,12 @@ app.get('/api/stats', (req, res) => {
     automations: Object.keys(AUTOS).length, agents: Object.keys(AGENTS).length,
     tasks: Object.keys(TASKS).length, knowledgeNodes: KG.nodes.length,
     experiments: Object.keys(EXPERIMENTS).length,
-    uptime: Math.floor(process.uptime()), version: '13.2'
+    uptime: Math.floor(process.uptime()), version: '13.3'
   });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`🚀 AGII v13.2 running on port ${PORT}`);
-  sysLog('info', 'server', `AGII v13.2 started on port ${PORT}`);
+  console.log(`🚀 AGII v13.3 running on port ${PORT}`);
+  sysLog('info', 'server', `AGII v13.3 started on port ${PORT}`);
 });

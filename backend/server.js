@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   AGII v13.1 — Production AI Agent Platform
+   AGII v13.2 — Production AI Agent Platform
    Multi-agent orchestration, persistent memory, real tools, self-improvement
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -25,6 +25,37 @@ app.use(rateLimit({ windowMs: 60000, max: 500, standardHeaders: true, legacyHead
 
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
 const groq   = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+// ─── Rate-limit aware Groq wrapper ───────────────────────────────────────────
+// Groq free tier: ~6000 TPM per model. We queue calls and retry on 429.
+const groqQueue = [];
+let groqActive  = 0;
+const MAX_CONCURRENT = 2;
+
+async function groqCall(params, retries = 4) {
+  // Wait for a slot
+  while (groqActive >= MAX_CONCURRENT) await new Promise(r => setTimeout(r, 200));
+  groqActive++;
+  try {
+    return await groqCall(params);
+  } catch(e) {
+    const msg = e?.message || '';
+    if (msg.includes('429') || msg.includes('rate_limit')) {
+      if (retries <= 0) throw e;
+      // Extract wait time from error or default to 15s
+      const waitMatch = msg.match(/try again in ([0-9.]+)s/);
+      const wait = waitMatch ? Math.ceil(parseFloat(waitMatch[1]) * 1000) + 500 : 15000;
+      sysLog('warn', 'groq', `Rate limited — waiting ${wait}ms, retries left: ${retries}`);
+      await new Promise(r => setTimeout(r, wait));
+      groqActive--; // release slot during wait
+      return await groqCall(params, retries - 1);
+    }
+    throw e;
+  } finally {
+    groqActive = Math.max(0, groqActive - 1);
+  }
+}
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DATA LAYER
@@ -118,17 +149,17 @@ function skillSave() { jsave(SKILLS_FILE, SKILLS); }
 // AGENT REGISTRY — 11 built-in specialized agents
 // ─────────────────────────────────────────────────────────────────────────────
 const AGENT_DEFS = {
-  orchestrator: { name:'Orchestrator',   emoji:'🧠', role:'orchestrator',   model:'llama-3.1-8b-instant', desc:'Coordinates all agents. Decomposes complex goals into subtasks and delegates to specialists.' },
-  researcher:   { name:'Researcher',     emoji:'🔍', role:'researcher',     model:'llama-3.1-8b-instant', desc:'Web search, data gathering, fact verification, literature review.' },
-  coder:        { name:'Code Engineer',  emoji:'💻', role:'coder',          model:'llama-3.1-8b-instant', desc:'Writes, reviews, debugs and optimizes code in any programming language.' },
-  analyst:      { name:'Analyst',        emoji:'📊', role:'analyst',        model:'llama-3.1-8b-instant', desc:'Data analysis, pattern recognition, statistical insights, visualization.' },
-  writer:       { name:'Writer',         emoji:'✍️', role:'writer',         model:'llama-3.1-8b-instant', desc:'Content creation, copywriting, documentation, structured reports.' },
-  planner:      { name:'Planner',        emoji:'📋', role:'planner',        model:'llama-3.1-8b-instant', desc:'Strategic task decomposition, dependency mapping, timeline estimation.' },
-  critic:       { name:'Critic',         emoji:'🎯', role:'critic',         model:'llama-3.1-8b-instant', desc:'Quality assurance, error detection, improvement suggestions.' },
+  orchestrator: { name:'Orchestrator',   emoji:'🧠', role:'orchestrator',   model:'llama-3.1-8b-instant',    desc:'Coordinates all agents. Decomposes complex goals into subtasks and delegates to specialists.' },
+  researcher:   { name:'Researcher',     emoji:'🔍', role:'researcher',     model:'gemma2-9b-it',             desc:'Web search, data gathering, fact verification, literature review.' },
+  coder:        { name:'Code Engineer',  emoji:'💻', role:'coder',          model:'llama-3.3-70b-versatile',  desc:'Writes, reviews, debugs and optimizes code in any programming language.' },
+  analyst:      { name:'Analyst',        emoji:'📊', role:'analyst',        model:'mixtral-8x7b-32768',       desc:'Data analysis, pattern recognition, statistical insights, visualization.' },
+  writer:       { name:'Writer',         emoji:'✍️', role:'writer',         model:'llama-3.3-70b-versatile',  desc:'Content creation, copywriting, documentation, structured reports.' },
+  planner:      { name:'Planner',        emoji:'📋', role:'planner',        model:'gemma2-9b-it',             desc:'Strategic task decomposition, dependency mapping, timeline estimation.' },
+  critic:       { name:'Critic',         emoji:'🎯', role:'critic',         model:'mixtral-8x7b-32768',       desc:'Quality assurance, error detection, improvement suggestions.' },
   memory_agent: { name:'Memory Agent',   emoji:'💾', role:'memory_agent',   model:'llama-3.1-8b-instant',    desc:'Knowledge storage, retrieval, context compression.' },
-  executor:     { name:'Executor',       emoji:'⚡', role:'executor',       model:'llama-3.1-8b-instant', desc:'Runs tools, executes tasks, manages file operations.' },
+  executor:     { name:'Executor',       emoji:'⚡', role:'executor',       model:'gemma2-9b-it',             desc:'Runs tools, executes tasks, manages file operations.' },
   monitor:      { name:'Monitor',        emoji:'📡', role:'monitor',        model:'llama-3.1-8b-instant',    desc:'System health, performance metrics, anomaly detection.' },
-  optimizer:    { name:'Optimizer',      emoji:'🔧', role:'optimizer',      model:'llama-3.1-8b-instant', desc:'Performance analysis, architecture improvements, self-optimization.' },
+  optimizer:    { name:'Optimizer',      emoji:'🔧', role:'optimizer',      model:'mixtral-8x7b-32768',       desc:'Performance analysis, architecture improvements, self-optimization.' },
 };
 
 const AGENTS_FILE = path.join(DATA, 'agents', 'registry.json');
@@ -388,7 +419,7 @@ async function execTool(name, args, sessionId, depth = 0) {
       }
 
       case 'reason_and_plan': {
-        const c = await groq.chat.completions.create({
+        const c = await groqCall({
           model: 'llama-3.1-8b-instant',
           messages: [
             { role: 'system', content: 'You are a deep reasoning engine. Think step by step and produce structured plans.' },
@@ -400,7 +431,7 @@ async function execTool(name, args, sessionId, depth = 0) {
       }
 
       case 'analyze_image_url': {
-        const c = await groq.chat.completions.create({
+        const c = await groqCall({
           model: 'meta-llama/llama-4-scout-17b-16e-instruct',
           messages: [{ role: 'user', content: [
             { type: 'image_url', image_url: { url: args.url } },
@@ -441,7 +472,7 @@ async function execTool(name, args, sessionId, depth = 0) {
           memoryItems: memTotal, skills: Object.keys(SKILLS).length,
           automations: Object.keys(AUTOS).length, agents: Object.keys(AGENTS).length,
           tasks: Object.keys(TASKS).length, knowledgeNodes: KG.nodes.length,
-          uptime: Math.floor(process.uptime()), version: '13.1'
+          uptime: Math.floor(process.uptime()), version: '13.2'
         };
       }
 
@@ -453,7 +484,7 @@ async function execTool(name, args, sessionId, depth = 0) {
 
       case 'run_benchmark': {
         const start = Date.now();
-        const c = await groq.chat.completions.create({
+        const c = await groqCall({
           model: 'llama-3.1-8b-instant',
           messages: [
             { role: 'system', content: `You are being benchmarked on ${args.test}. Give your best answer.` },
@@ -501,7 +532,7 @@ async function runAgentTask(task, sessionId, send, depth = 1) {
   try {
     while (itr < maxItr) {
       itr++;
-      const comp   = await groq.chat.completions.create({ model: agent.model || 'llama-3.3-70b-versatile', messages, tools: SUB_TOOLS, tool_choice: 'auto', temperature: 0.4, max_tokens: 3000 });
+      const comp   = await groqCall({ model: agent.model || 'llama-3.3-70b-versatile', messages, tools: SUB_TOOLS, tool_choice: 'auto', temperature: 0.4, max_tokens: 2000 });
       const choice = comp.choices[0];
       const msg    = choice.message;
       messages.push(cleanMsg(msg));
@@ -577,7 +608,7 @@ Always use tools when they add value. For multi-step work, delegate to agents.`;
     // Try models in order until one works
     for (const tryModel of modelOrder) {
       try {
-        comp = await groq.chat.completions.create({
+        comp = await groqCall({
           model:       tryModel,
           messages,
           tools:       TOOLS,
@@ -593,7 +624,7 @@ Always use tools when they add value. For multi-step work, delegate to agents.`;
         if (modelErr.message && modelErr.message.includes('tool_use_failed')) {
           // Try without tools as final fallback
           try {
-            comp = await groq.chat.completions.create({
+            comp = await groqCall({
               model: 'llama-3.1-8b-instant',
               messages: messages.filter(m => m.role !== 'tool'),
               temperature: 0.7,
@@ -631,7 +662,7 @@ Always use tools when they add value. For multi-step work, delegate to agents.`;
 
 // Health
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '13.1', uptime: Math.floor(process.uptime()), agents: Object.keys(AGENTS).length, timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '13.2', uptime: Math.floor(process.uptime()), agents: Object.keys(AGENTS).length, timestamp: new Date().toISOString() });
 });
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
@@ -732,7 +763,7 @@ app.post('/api/mission', async (req, res) => {
 
   // Critic reviews all results
   const allResults = results.map((r, i) => `${tasks[i].role}: ${r.status === 'fulfilled' ? r.value?.result?.slice(0,300) : r.reason}`).join('\n\n');
-  const synthesis  = await groq.chat.completions.create({
+  const synthesis  = await groqCall({
     model: 'llama-3.1-8b-instant',
     messages: [
       { role: 'system', content: 'You are a synthesis agent. Combine the following agent outputs into one coherent, complete response.' },
@@ -932,12 +963,12 @@ app.get('/api/stats', (req, res) => {
     automations: Object.keys(AUTOS).length, agents: Object.keys(AGENTS).length,
     tasks: Object.keys(TASKS).length, knowledgeNodes: KG.nodes.length,
     experiments: Object.keys(EXPERIMENTS).length,
-    uptime: Math.floor(process.uptime()), version: '13.1'
+    uptime: Math.floor(process.uptime()), version: '13.2'
   });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`🚀 AGII v13.1 running on port ${PORT}`);
-  sysLog('info', 'server', `AGII v13.1 started on port ${PORT}`);
+  console.log(`🚀 AGII v13.2 running on port ${PORT}`);
+  sysLog('info', 'server', `AGII v13.2 started on port ${PORT}`);
 });

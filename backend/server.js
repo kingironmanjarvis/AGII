@@ -23,6 +23,7 @@ const cm=(m)=>{
   if(!m||typeof m!=='object') return null;
   const r={role:m.role||'user'};
   if(m.content!==undefined&&m.content!==null) r.content=typeof m.content==='string'?m.content:JSON.stringify(m.content);
+  else r.content=null;
   if(m.tool_calls) r.tool_calls=m.tool_calls;
   if(m.tool_call_id) r.tool_call_id=m.tool_call_id;
   return r;
@@ -350,7 +351,10 @@ function saveSession(id){
 // ── MAIN AGENT LOOP ───────────────────────────────────────────────────────────
 async function agentLoop(session,sessionId,send){
   const sys=buildSystemPrompt();
-  const messages=[{role:'system',content:sys},...session.messages.slice(-30).map(cm).filter(Boolean)];
+  const messages=[{role:'system',content:sys},...session.messages.slice(-30)
+    .filter(m=>m.role==='user'||m.role==='assistant')
+    .map(m=>({role:m.role,content:typeof m.content==='string'?m.content:JSON.stringify(m.content)||''}))
+    .filter(m=>m.content)];
   let finalResponse=''; let itr=0;
 
   while(itr<15){
@@ -365,8 +369,7 @@ async function agentLoop(session,sessionId,send){
       comp=await groq.chat.completions.create({
         model:'llama-3.3-70b-versatile',
         messages,tools:TOOLS,tool_choice:'auto',
-        temperature:0.7,max_tokens:4096,
-        parallel_tool_calls:false
+        temperature:0.7,max_tokens:4096
       });
     } catch(e){
       compError=e;

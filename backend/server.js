@@ -140,7 +140,7 @@ function taskNew(mId, role, desc) {
 
 // ── TOOLS ────────────────────────────────────────────────────────────────────
 const TOOLS=[
-  {type:'function',function:{name:'web_search',description:'Search the internet for real-time information, news, and facts.',parameters:{type:'object',properties:{query:{type:'string',description:'Search query'},count:{type:'integer',description:'Number of results, default 6'}},required:['query']}}},
+  {type:'function',function:{name:'web_search',description:'Search the internet for real-time information, news, and facts.',parameters:{type:'object',properties:{query:{type:'string',description:'The search query'}},required:['query']}}},
   {type:'function',function:{name:'fetch_url',description:'Fetch and read the full text content of any webpage or URL.',parameters:{type:'object',properties:{url:{type:'string',description:'The URL to fetch'}},required:['url']}}},
   {type:'function',function:{name:'execute_code',description:'Execute JavaScript code for calculations, data processing, or algorithms. Returns the result.',parameters:{type:'object',properties:{code:{type:'string',description:'JavaScript code to execute'},description:{type:'string',description:'What this code does'}},required:['code']}}},
   {type:'function',function:{name:'remember',description:'Store important information in persistent long-term memory for future sessions.',parameters:{type:'object',properties:{type:{type:'string',enum:['facts','preferences','projects','notes','people','knowledge','decisions','patterns'],description:'Memory category'},content:{type:'string',description:'The information to store'}},required:['type','content']}}},
@@ -168,7 +168,7 @@ async function runTool(name, args, sessionId) {
   try {
     switch(name) {
       case 'web_search': {
-        const q=args.query||'', count=Math.min(args.count||6,10);
+        const q=args.query||'', count=8;
         try {
           const r=await axios.get('https://api.duckduckgo.com/',{params:{q,format:'json',no_html:1,skip_disambig:1},timeout:8000});
           const res=[]; const d=r.data;

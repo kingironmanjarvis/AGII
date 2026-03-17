@@ -94,16 +94,16 @@ function kgNode(label, type) {
 
 // ── AGENTS ──────────────────────────────────────────────────────────────────
 const ROLES = {
-  orchestrator: {name:'Orchestrator', emoji:'🧠', model:'llama-3.3-70b-versatile', temp:0.2, desc:'Master coordinator. Plans missions, decomposes goals into task graphs, coordinates all agents.'},
-  researcher:   {name:'Researcher',   emoji:'🔍', model:'llama-3.3-70b-versatile', temp:0.3, desc:'Deep research specialist. Web search, fact verification, source analysis, knowledge extraction.'},
-  coder:        {name:'Code Engineer',emoji:'💻', model:'llama-3.3-70b-versatile', temp:0.1, desc:'Senior software engineer. Writes production-quality code, reviews, debugs, tests in any language.'},
-  analyst:      {name:'Data Analyst', emoji:'📊', model:'llama-3.3-70b-versatile', temp:0.3, desc:'Quantitative analyst. Data analysis, statistics, pattern detection, trend identification.'},
-  writer:       {name:'Writer',       emoji:'✍️', model:'llama-3.3-70b-versatile', temp:0.7, desc:'Expert writer. Technical docs, reports, copywriting, structured content.'},
-  planner:      {name:'Planner',      emoji:'📋', model:'llama-3.3-70b-versatile', temp:0.2, desc:'Strategic planner. Task decomposition, dependency mapping, timeline estimation.'},
-  critic:       {name:'Critic',       emoji:'🎯', model:'llama-3.3-70b-versatile', temp:0.3, desc:'Quality reviewer. Error detection, logical validation, improvement suggestions.'},
-  executor:     {name:'Executor',     emoji:'⚡', model:'llama-3.3-70b-versatile', temp:0.2, desc:'Task executor. Runs tools, manages files, executes code, handles system operations.'},
+  orchestrator: {name:'Orchestrator', emoji:'🧠', model:'meta-llama/llama-4-scout-17b-16e-instruct', temp:0.2, desc:'Master coordinator. Plans missions, decomposes goals into task graphs, coordinates all agents.'},
+  researcher:   {name:'Researcher',   emoji:'🔍', model:'meta-llama/llama-4-scout-17b-16e-instruct', temp:0.3, desc:'Deep research specialist. Web search, fact verification, source analysis, knowledge extraction.'},
+  coder:        {name:'Code Engineer',emoji:'💻', model:'meta-llama/llama-4-scout-17b-16e-instruct', temp:0.1, desc:'Senior software engineer. Writes production-quality code, reviews, debugs, tests in any language.'},
+  analyst:      {name:'Data Analyst', emoji:'📊', model:'meta-llama/llama-4-scout-17b-16e-instruct', temp:0.3, desc:'Quantitative analyst. Data analysis, statistics, pattern detection, trend identification.'},
+  writer:       {name:'Writer',       emoji:'✍️', model:'meta-llama/llama-4-scout-17b-16e-instruct', temp:0.7, desc:'Expert writer. Technical docs, reports, copywriting, structured content.'},
+  planner:      {name:'Planner',      emoji:'📋', model:'meta-llama/llama-4-scout-17b-16e-instruct', temp:0.2, desc:'Strategic planner. Task decomposition, dependency mapping, timeline estimation.'},
+  critic:       {name:'Critic',       emoji:'🎯', model:'meta-llama/llama-4-scout-17b-16e-instruct', temp:0.3, desc:'Quality reviewer. Error detection, logical validation, improvement suggestions.'},
+  executor:     {name:'Executor',     emoji:'⚡', model:'meta-llama/llama-4-scout-17b-16e-instruct', temp:0.2, desc:'Task executor. Runs tools, manages files, executes code, handles system operations.'},
   memory_agent: {name:'Memory Agent', emoji:'💾', model:'llama-3.1-8b-instant',    temp:0.1, desc:'Knowledge curator. Stores, retrieves, and indexes information across sessions.'},
-  optimizer:    {name:'Optimizer',    emoji:'🔧', model:'llama-3.3-70b-versatile', temp:0.3, desc:'Performance optimizer. Bottleneck detection, efficiency improvements.'},
+  optimizer:    {name:'Optimizer',    emoji:'🔧', model:'meta-llama/llama-4-scout-17b-16e-instruct', temp:0.3, desc:'Performance optimizer. Bottleneck detection, efficiency improvements.'},
   security:     {name:'Security',     emoji:'🛡️', model:'llama-3.1-8b-instant',    temp:0.1, desc:'Security auditor. Validates safety, checks for risks, enforces constraints.'},
 };
 
@@ -258,7 +258,7 @@ async function runTool(name, args, sessionId) {
         return {success:res.success,role:args.role,result:res.result,error:res.error};
       }
       case 'reason_deep': {
-        const c=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages:[{role:'system',content:'You are a deep reasoning engine. Think step by step, consider multiple angles, and produce rigorous structured analysis.'},{role:'user',content:`Problem:\n\n${args.problem}\n\nProvide:\n1. Problem decomposition\n2. Key considerations\n3. Multiple approaches\n4. Recommended approach with justification\n5. Risks and mitigations`}],temperature:0.3,max_tokens:3000});
+        const c=await groq.chat.completions.create({model:'meta-llama/llama-4-scout-17b-16e-instruct',messages:[{role:'system',content:'You are a deep reasoning engine. Think step by step, consider multiple angles, and produce rigorous structured analysis.'},{role:'user',content:`Problem:\n\n${args.problem}\n\nProvide:\n1. Problem decomposition\n2. Key considerations\n3. Multiple approaches\n4. Recommended approach with justification\n5. Risks and mitigations`}],temperature:0.3,max_tokens:3000});
         return {success:true,reasoning:c.choices[0].message.content};
       }
       case 'analyze_image': {
@@ -293,7 +293,7 @@ async function runTool(name, args, sessionId) {
         const prompt=benchmarks[cap]||benchmarks.reasoning;
         try {
           const t0=Date.now();
-          const comp=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages:[{role:'system',content:'You are being evaluated. Provide the best possible answer. Be thorough, accurate, and complete.'},{role:'user',content:prompt}],temperature:0.3,max_tokens:2000});
+          const comp=await groq.chat.completions.create({model:'meta-llama/llama-4-scout-17b-16e-instruct',messages:[{role:'system',content:'You are being evaluated. Provide the best possible answer. Be thorough, accurate, and complete.'},{role:'user',content:prompt}],temperature:0.3,max_tokens:2000});
           const answer=comp.choices[0].message.content;
           const latency=Date.now()-t0;
           const evalComp=await groq.chat.completions.create({model:'llama-3.1-8b-instant',messages:[{role:'system',content:'You are an objective AI evaluator. Score the following answer on a scale of 0-100. Return ONLY a JSON object with: {"score": <number>, "completeness": <0-100>, "correctness": <0-100>, "quality": <0-100>, "feedback": "<brief feedback>"}. Return valid JSON only.'},{role:'user',content:`Task: ${prompt}\n\nAnswer:\n${answer}`}],temperature:0.1,max_tokens:300,response_format:{type:'json_object'}});
@@ -328,7 +328,7 @@ async function runAgentTask(task, sessionId, send) {
     let result=''; let itr=0;
     while(itr<6) {
       itr++;
-      const comp=await groq.chat.completions.create({model:agent.model||'llama-3.3-70b-versatile',messages,tools:TOOLS,tool_choice:'auto',temperature:agent.temp||0.4,max_tokens:3000});
+      const comp=await groq.chat.completions.create({model:'meta-llama/llama-4-scout-17b-16e-instruct',messages,tools:TOOLS,tool_choice:'auto',temperature:agent.temp||0.4,max_tokens:3000});
       const choice=comp.choices[0]; const msg=choice.message;
       messages.push(cm(msg));
       if(choice.finish_reason==='tool_calls'&&msg.tool_calls) {
@@ -362,7 +362,7 @@ async function runMission(desc, sessionId, send) {
   if(send) send({type:'mission_start',missionId:mId});
   try {
     const planComp=await groq.chat.completions.create({
-      model:'llama-3.3-70b-versatile',
+      model:'meta-llama/llama-4-scout-17b-16e-instruct',
       messages:[
         {role:'system',content:'You are a mission planning AI. Return ONLY valid JSON.'},
         {role:'user',content:`Mission: "${desc}"\n\nCreate optimal task graph with 2-5 tasks.\n\nReturn:\n{"plan":"brief strategy","tasks":[{"role":"researcher|coder|analyst|writer|planner|critic|executor|optimizer","desc":"specific detailed task description","deps":[]}]}\n\nDeps = zero-based indices of tasks that must complete first.`}
@@ -399,7 +399,7 @@ async function runMission(desc, sessionId, send) {
 
 // ── PERSONAS ─────────────────────────────────────────────────────────────────
 const PERSONAS_FILE=path.join(DATA,'personas','registry.json');
-let PERSONAS=rj(PERSONAS_FILE,{default:{id:'default',name:'AGII',avatar:'🤖',model:'llama-3.3-70b-versatile',temperature:0.7,systemPrompt:`You are AGII — a production-grade distributed AI agent platform built for real work.\n\nYou have 11 specialized agents you can coordinate, persistent memory across sessions, real tool execution (web search, code execution, file creation, URL fetching), and multi-agent mission orchestration.\n\nYour principles:\n- Use tools proactively. Don't say "I would search..." — actually search using web_search.\n- For complex tasks, spawn specialized agents or run reason_deep first.\n- Store important information to memory automatically using remember.\n- Create files when producing code, reports, or structured data using write_file.\n- Be direct, precise, and thorough. Show what tools you used.\n- When producing code, always write it to a file using write_file so the user can download it.`,created:new Date().toISOString()}});
+let PERSONAS=rj(PERSONAS_FILE,{default:{id:'default',name:'AGII',avatar:'🤖',model:'meta-llama/llama-4-scout-17b-16e-instruct',temperature:0.7,systemPrompt:`You are AGII — a production-grade distributed AI agent platform built for real work.\n\nYou have 11 specialized agents you can coordinate, persistent memory across sessions, real tool execution (web search, code execution, file creation, URL fetching), and multi-agent mission orchestration.\n\nYour principles:\n- Use tools proactively. Don't say "I would search..." — actually search using web_search.\n- For complex tasks, spawn specialized agents or run reason_deep first.\n- Store important information to memory automatically using remember.\n- Create files when producing code, reports, or structured data using write_file.\n- Be direct, precise, and thorough. Show what tools you used.\n- When producing code, always write it to a file using write_file so the user can download it.`,created:new Date().toISOString()}});
 function savePersonas(){wj(PERSONAS_FILE,PERSONAS);}
 
 // ── SESSIONS ─────────────────────────────────────────────────────────────────
@@ -430,7 +430,7 @@ async function agentLoop(session, sessionId, send) {
   let finalResponse=''; let itr=0;
   while(itr<12){
     itr++;
-    const comp=await groq.chat.completions.create({model:session.model||'llama-3.3-70b-versatile',messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096});
+    const comp=await groq.chat.completions.create({model:'meta-llama/llama-4-scout-17b-16e-instruct',messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096});
     const choice=comp.choices[0]; const msg=choice.message;
     messages.push(cm(msg));
     if(choice.finish_reason==='tool_calls'&&msg.tool_calls){
@@ -495,7 +495,7 @@ app.post('/api/chat',async(req,res)=>{
       const mission=await runMission(message,sessionId,send);
       if(mission?.synthesis&&mission.synthesis.length>50){
         send({type:'status',text:'🔗 Synthesizing results...'});
-        const sc=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages:[{role:'system',content:PERSONAS['default'].systemPrompt},{role:'user',content:`Original request: "${message}"\n\nAgent outputs:\n\n${mission.synthesis}\n\nSynthesize into a clear, comprehensive, well-structured response.`}],temperature:0.5,max_tokens:3000});
+        const sc=await groq.chat.completions.create({model:'meta-llama/llama-4-scout-17b-16e-instruct',messages:[{role:'system',content:PERSONAS['default'].systemPrompt},{role:'user',content:`Original request: "${message}"\n\nAgent outputs:\n\n${mission.synthesis}\n\nSynthesize into a clear, comprehensive, well-structured response.`}],temperature:0.5,max_tokens:3000});
         finalResponse=sc.choices[0].message.content;
       } else {finalResponse=await agentLoop(session,sessionId,send);}
     } else {finalResponse=await agentLoop(session,sessionId,send);}
@@ -541,7 +541,7 @@ app.get('/api/tasks/:id',(req,res)=>{const t=TASKS[req.params.id];if(!t)return r
 
 // Models
 app.get('/api/models',(req,res)=>res.json([
-  {id:'llama-3.3-70b-versatile',name:'Llama 3.3 70B',provider:'Groq',speed:'Fast',recommended:true},
+  {id:'meta-llama/llama-4-scout-17b-16e-instruct',name:'Llama 4 Scout 17B',provider:'Groq',speed:'Fast',recommended:true,vision:true},
   {id:'llama-3.1-8b-instant',name:'Llama 3.1 8B',provider:'Groq',speed:'Ultra Fast'},
   {id:'meta-llama/llama-4-scout-17b-16e-instruct',name:'Llama 4 Scout 17B',provider:'Groq',speed:'Fast',vision:true},
   {id:'deepseek-r1-distill-llama-70b',name:'DeepSeek R1 70B',provider:'Groq',speed:'Medium',reasoning:true},

@@ -262,7 +262,7 @@ async function runTool(name, args, sessionId) {
         return {success:true,reasoning:c.choices[0].message.content};
       }
       case 'analyze_image': {
-        const c=await groq.chat.completions.create({model:'meta-llama/llama-4-scout-17b-16e-instruct',messages:[{role:'user',content:[{type:'image_url',image_url:{url:args.url}},{type:'text',text:args.question||'Analyze this image in detail.'}]}],max_tokens:1500});
+        const c=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages:[{role:'user',content:[{type:'image_url',image_url:{url:args.url}},{type:'text',text:args.question||'Analyze this image in detail.'}]}],max_tokens:1500});
         return {success:true,analysis:c.choices[0].message.content};
       }
       case 'calculate': {
@@ -283,12 +283,29 @@ async function runTool(name, args, sessionId) {
       }
       case 'evaluate_performance': {
         const cap=args.capability||'reasoning';
-        const score=Math.round(72+Math.random()*24);
-        const EV=rj(path.join(DATA,'evaluations','history.json'),[]);
-        EV.push({id:uid(),capability:cap,score,ts:new Date().toISOString(),version:'v15'});
-        if(EV.length>1000) EV.splice(0,EV.length-1000);
-        wj(path.join(DATA,'evaluations','history.json'),EV);
-        return {success:true,capability:cap,score,pass:score>=70,ts:new Date().toISOString()};
+        const benchmarks={
+          reasoning:'Solve this step by step: If a train travels 120km in 1.5 hours, then stops for 30 minutes, then travels 80km in 1 hour, what is the average speed for the entire journey including the stop? Show your work.',
+          coding:'Write a Python function that takes a list of integers and returns the longest increasing subsequence. Include proper type hints, edge case handling, and time complexity analysis.',
+          memory:'Given these facts: Alice is Bob\'s sister. Bob is married to Carol. Carol has a daughter named Diana. What is Alice\'s relationship to Diana? Explain your reasoning step by step.',
+          research:'Explain the key differences between transformer and state-space model architectures for sequence modeling. Cover attention mechanisms, computational complexity, and practical trade-offs.',
+          planning:'You need to build a web application with user auth, a database, and a REST API. Create a detailed project plan with task dependencies, estimated times, and risk factors.'
+        };
+        const prompt=benchmarks[cap]||benchmarks.reasoning;
+        try {
+          const t0=Date.now();
+          const comp=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages:[{role:'system',content:'You are being evaluated. Provide the best possible answer. Be thorough, accurate, and complete.'},{role:'user',content:prompt}],temperature:0.3,max_tokens:2000});
+          const answer=comp.choices[0].message.content;
+          const latency=Date.now()-t0;
+          const evalComp=await groq.chat.completions.create({model:'llama-3.1-8b-instant',messages:[{role:'system',content:'You are an objective AI evaluator. Score the following answer on a scale of 0-100. Return ONLY a JSON object with: {"score": <number>, "completeness": <0-100>, "correctness": <0-100>, "quality": <0-100>, "feedback": "<brief feedback>"}. Return valid JSON only.'},{role:'user',content:`Task: ${prompt}\n\nAnswer:\n${answer}`}],temperature:0.1,max_tokens:300,response_format:{type:'json_object'}});
+          let scores;
+          try { scores=JSON.parse(evalComp.choices[0].message.content); } catch { scores={score:75,completeness:75,correctness:75,quality:75,feedback:'Evaluation parse error'}; }
+          const score=typeof scores.score==='number'?Math.min(100,Math.max(0,scores.score)):75;
+          const EV=rj(path.join(DATA,'evaluations','history.json'),[]);
+          EV.push({id:uid(),capability:cap,score,completeness:scores.completeness,correctness:scores.correctness,quality:scores.quality,feedback:scores.feedback,latencyMs:latency,ts:new Date().toISOString(),version:'v15'});
+          if(EV.length>1000) EV.splice(0,EV.length-1000);
+          wj(path.join(DATA,'evaluations','history.json'),EV);
+          return {success:true,capability:cap,score,pass:score>=70,details:scores,latencyMs:latency,ts:new Date().toISOString()};
+        } catch(e) { return {success:false,capability:cap,error:e.message}; }
       }
       default: return {success:false,error:`Unknown tool: ${name}`};
     }
@@ -311,7 +328,7 @@ async function runAgentTask(task, sessionId, send) {
     let result=''; let itr=0;
     while(itr<6) {
       itr++;
-      const comp=await groq.chat.completions.create({model:agent.model||'llama-3.3-70b-versatile',messages,tools:TOOLS,tool_choice:'auto',temperature:agent.temp||0.4,max_tokens:3000});
+      const comp=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages,tools:TOOLS,tool_choice:'auto',temperature:agent.temp||0.4,max_tokens:3000,parallel_tool_calls:false});
       const choice=comp.choices[0]; const msg=choice.message;
       messages.push(cm(msg));
       if(choice.finish_reason==='tool_calls'&&msg.tool_calls) {
@@ -382,7 +399,7 @@ async function runMission(desc, sessionId, send) {
 
 // ── PERSONAS ─────────────────────────────────────────────────────────────────
 const PERSONAS_FILE=path.join(DATA,'personas','registry.json');
-let PERSONAS=rj(PERSONAS_FILE,{default:{id:'default',name:'AGII',avatar:'🤖',model:'llama-3.3-70b-versatile',temperature:0.7,systemPrompt:`You are AGII — a production-grade distributed AI agent platform built for real work.\n\nYou have 11 specialized agents you can coordinate, persistent memory across sessions, real tool execution (web search, code execution, file creation, URL fetching), and multi-agent mission orchestration.\n\nYour principles:\n- Use tools proactively. Don't say "I would search..." — actually search using web_search.\n- For complex tasks, spawn specialized agents or run reason_deep first.\n- Store important information to memory automatically using remember.\n- Create files when producing code, reports, or structured data using write_file.\n- Be direct, precise, and thorough. Show what tools you used.\n- When producing code, always write it to a file using write_file so the user can download it.`,created:new Date().toISOString()}});
+let PERSONAS=rj(PERSONAS_FILE,{default:{id:'default',name:'AGII',avatar:'🤖',model:'llama-3.3-70b-versatile',temperature:0.7,systemPrompt:`You are AGII — a production-grade distributed AI agent platform built for real work.\n\nYou have 11 specialized agents you can coordinate, persistent memory across sessions, real tool execution (web search, code execution, file creation, URL fetching), and multi-agent mission orchestration.\n\nYour principles:\n- Use tools proactively whenever relevant. Always execute tools rather than describing what you would do.\n- For complex tasks, spawn specialized agents or run reason_deep first.\n- Store important information to memory automatically.\n- Create downloadable files when producing code, reports, or structured data.\n- Be direct, precise, and thorough. Show what tools you used.\n- When producing code, always write it to a file using write_file so the user can download it.`,created:new Date().toISOString()}});
 function savePersonas(){wj(PERSONAS_FILE,PERSONAS);}
 
 // ── SESSIONS ─────────────────────────────────────────────────────────────────
@@ -413,7 +430,8 @@ async function agentLoop(session, sessionId, send) {
   let finalResponse=''; let itr=0;
   while(itr<12){
     itr++;
-    const comp=await groq.chat.completions.create({model:session.model||'llama-3.3-70b-versatile',messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096});
+    const toolModel=session.model||'llama-3.3-70b-versatile';
+    const comp=await groq.chat.completions.create({model:toolModel,messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096,parallel_tool_calls:false});
     const choice=comp.choices[0]; const msg=choice.message;
     messages.push(cm(msg));
     if(choice.finish_reason==='tool_calls'&&msg.tool_calls){
@@ -524,9 +542,9 @@ app.get('/api/tasks/:id',(req,res)=>{const t=TASKS[req.params.id];if(!t)return r
 
 // Models
 app.get('/api/models',(req,res)=>res.json([
-  {id:'llama-3.3-70b-versatile',name:'Llama 3.3 70B',provider:'Groq',speed:'Fast',recommended:true},
+  {id:'llama-3.3-70b-versatile',name:'Llama 4 Scout 17B',provider:'Groq',speed:'Fast',recommended:true,vision:true},
   {id:'llama-3.1-8b-instant',name:'Llama 3.1 8B',provider:'Groq',speed:'Ultra Fast'},
-  {id:'meta-llama/llama-4-scout-17b-16e-instruct',name:'Llama 4 Scout 17B',provider:'Groq',speed:'Fast',vision:true},
+  {id:'llama-3.3-70b-versatile',name:'Llama 4 Scout 17B',provider:'Groq',speed:'Fast',vision:true},
   {id:'deepseek-r1-distill-llama-70b',name:'DeepSeek R1 70B',provider:'Groq',speed:'Medium',reasoning:true},
   {id:'qwen-qwq-32b',name:'Qwen QwQ 32B',provider:'Groq',speed:'Medium',reasoning:true},
   {id:'mixtral-8x7b-32768',name:'Mixtral 8x7B',provider:'Groq',speed:'Fast'},

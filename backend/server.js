@@ -140,7 +140,7 @@ function taskNew(mId, role, desc) {
 
 // ── TOOLS ────────────────────────────────────────────────────────────────────
 const TOOLS=[
-  {type:'function',function:{name:'web_search',description:'Search the internet for real-time information, news, and facts.',parameters:{type:'object',properties:{query:{type:'string',description:'Search query'},count:{type:'integer',description:'Number of results, default 6'}},required:['query']}}},
+  {type:'function',function:{name:'web_search',description:'Search the internet for real-time information, news, and facts.',parameters:{type:'object',properties:{query:{type:'string',description:'The search query'}},required:['query']}}},
   {type:'function',function:{name:'fetch_url',description:'Fetch and read the full text content of any webpage or URL.',parameters:{type:'object',properties:{url:{type:'string',description:'The URL to fetch'}},required:['url']}}},
   {type:'function',function:{name:'execute_code',description:'Execute JavaScript code for calculations, data processing, or algorithms. Returns the result.',parameters:{type:'object',properties:{code:{type:'string',description:'JavaScript code to execute'},description:{type:'string',description:'What this code does'}},required:['code']}}},
   {type:'function',function:{name:'remember',description:'Store important information in persistent long-term memory for future sessions.',parameters:{type:'object',properties:{type:{type:'string',enum:['facts','preferences','projects','notes','people','knowledge','decisions','patterns'],description:'Memory category'},content:{type:'string',description:'The information to store'}},required:['type','content']}}},
@@ -152,7 +152,7 @@ const TOOLS=[
   {type:'function',function:{name:'run_skill',description:'Execute a previously saved named skill.',parameters:{type:'object',properties:{name:{type:'string',description:'Skill name to run'},args:{type:'object',description:'Arguments to pass to the skill'}},required:['name']}}},
   {type:'function',function:{name:'list_skills',description:'List all saved skills with their descriptions and usage stats.',parameters:{type:'object',properties:{}}}},
   {type:'function',function:{name:'create_automation',description:'Schedule a recurring task using a cron expression.',parameters:{type:'object',properties:{name:{type:'string',description:'Automation name'},description:{type:'string',description:'What this automation does'},task:{type:'string',description:'The task to execute on each run'},cron:{type:'string',description:'Cron expression e.g. 0 9 * * 1-5 for weekdays at 9am'}},required:['name','task','cron']}}},
-  {type:'function',function:{name:'spawn_agent',description:'Spawn a specialized sub-agent to handle a specific task. Available roles: researcher, coder, analyst, writer, planner, critic, executor, optimizer.',parameters:{type:'object',properties:{role:{type:'string',description:'Agent role: researcher, coder, analyst, writer, planner, critic, executor, or optimizer'},task:{type:'string',description:'Detailed task description for the agent'}},required:['role','task']}}},
+  {type:'function',function:{name:'spawn_agent',description:'Spawn a specialized sub-agent. Roles: researcher, coder, analyst, writer, planner, critic, executor, optimizer.',parameters:{type:'object',properties:{role:{type:'string',description:'Agent role: researcher, coder, analyst, writer, planner, critic, executor, or optimizer'},task:{type:'string',description:'Detailed task description for the agent'}},required:['role','task']}}},
   {type:'function',function:{name:'reason_deep',description:'Perform deep chain-of-thought reasoning on complex problems. Returns structured analysis with multiple approaches.',parameters:{type:'object',properties:{problem:{type:'string',description:'The problem or question to reason about deeply'}},required:['problem']}}},
   {type:'function',function:{name:'analyze_image',description:'Analyze and describe an image from a URL using vision AI.',parameters:{type:'object',properties:{url:{type:'string',description:'Image URL'},question:{type:'string',description:'Question to ask about the image'}},required:['url']}}},
   {type:'function',function:{name:'calculate',description:'Evaluate any mathematical expression and return the result.',parameters:{type:'object',properties:{expression:{type:'string',description:'Math expression to evaluate, e.g. 2+2 or Math.sqrt(144)'}},required:['expression']}}},
@@ -168,7 +168,7 @@ async function runTool(name, args, sessionId) {
   try {
     switch(name) {
       case 'web_search': {
-        const q=args.query||'', count=Math.min(args.count||6,10);
+        const q=args.query||'', count=8;
         try {
           const r=await axios.get('https://api.duckduckgo.com/',{params:{q,format:'json',no_html:1,skip_disambig:1},timeout:8000});
           const res=[]; const d=r.data;

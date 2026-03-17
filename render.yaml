@@ -6,6 +6,8 @@ services:
     buildCommand: npm install
     startCommand: node server.js
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: GROQ_API_KEY
         sync: false
       - key: TAVILY_API_KEY
@@ -16,14 +18,11 @@ services:
         sync: false
       - key: SUPABASE_URL
         sync: false
-      - key: SUPABASE_ANON_KEY
+      - key: SUPABASE_KEY
         sync: false
-      - key: NODE_ENV
-        value: production
 
   - type: web
     name: agii-v10-frontend
     env: static
     rootDir: frontend
-    buildCommand: echo "Static site"
     staticPublishPath: .

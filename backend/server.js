@@ -1,653 +1,518 @@
-require('dotenv').config();
-const express     = require('express');
-const cors        = require('cors');
-const helmet      = require('helmet');
-const compression = require('compression');
-const morgan      = require('morgan');
-const rateLimit   = require('express-rate-limit');
-const multer      = require('multer');
-const { v4: uid } = require('uuid');
-const Groq        = require('groq-sdk');
-const axios       = require('axios');
-const fs          = require('fs-extra');
-const path        = require('path');
-const cron        = require('node-cron');
-const http        = require('http');
+'use strict';
+const express=require('express');
+const cors=require('cors');
+const fs=require('fs');
+const path=require('path');
+const {v4:uid}=require('uuid');
+const Groq=require('groq-sdk');
 
-const app    = express();
-const server = http.createServer(app);
-const groq   = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const app=express();
+app.use(cors());
+app.use(express.json({limit:'10mb'}));
 
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(compression());
-app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','PATCH','OPTIONS'] }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use(morgan('tiny'));
-app.use(rateLimit({ windowMs: 60000, max: 600 }));
-const upload = multer({ dest: 'uploads/', limits: { fileSize: 50*1024*1024 } });
+const groq=new Groq({apiKey:process.env.GROQ_API_KEY});
+const PORT=process.env.PORT||3001;
+const DATA=process.env.DATA_DIR||'/tmp/agii-data';
+['sessions','memory','files','skills','projects'].forEach(d=>fs.mkdirSync(path.join(DATA,d),{recursive:true}));
 
-const DATA = path.join(__dirname, 'data');
-['sessions','memory','skills','automations','files','personas','agents','tasks','logs','knowledge','projects','evaluations']
-  .forEach(d => fs.ensureDirSync(path.join(DATA, d)));
-fs.ensureDirSync(path.join(__dirname, 'uploads'));
-
-function rj(p, def={}) { try { return JSON.parse(fs.readFileSync(p,'utf8')); } catch { return def; } }
-function wj(p, d) { fs.mkdirSync(path.dirname(p),{recursive:true}); fs.writeFileSync(p,JSON.stringify(d,null,2)); }
-
-function auditLog(level, source, msg, meta={}) {
-  try {
-    const f = path.join(DATA,'logs',`${new Date().toISOString().slice(0,10)}.json`);
-    const logs = rj(f, []);
-    logs.push({ id:uid(), ts:new Date().toISOString(), level, source, msg, meta });
-    if (logs.length > 5000) logs.splice(0, logs.length-5000);
-    wj(f, logs);
-  } catch {}
-}
-
-// CRITICAL: strip non-Groq fields (ts, etc.) before API calls
-function cm(m) {
-  const c = { role: m.role, content: m.content ?? null };
-  if (m.tool_calls)   c.tool_calls   = m.tool_calls;
-  if (m.tool_call_id) c.tool_call_id = m.tool_call_id;
-  if (m.name)         c.name         = m.name;
-  return c;
-}
-function pa(raw) { try { return typeof raw==='string'?JSON.parse(raw):(raw||{}); } catch { return {}; } }
-
-// ── MEMORY ──────────────────────────────────────────────────────────────────
-const MEM_FILE = path.join(DATA,'memory','global.json');
-let GM = rj(MEM_FILE, { facts:[],preferences:[],projects:[],notes:[],people:[],knowledge:[],decisions:[],patterns:[] });
-function saveMem() { wj(MEM_FILE, GM); }
-function memAdd(type, content) {
-  if (!GM[type]) GM[type]=[];
-  if (GM[type].some(i=>i.content===content)) return null;
-  const e = { id:uid(), content, ts:new Date().toISOString() };
-  GM[type].push(e);
-  if (GM[type].length>2000) GM[type]=GM[type].slice(-2000);
-  saveMem(); return e;
-}
-function memSearch(q) {
-  const ql=q.toLowerCase(), res=[];
-  for (const [type,items] of Object.entries(GM)) {
-    if (!Array.isArray(items)) continue;
-    items.forEach(i => { if (i.content?.toLowerCase().includes(ql)) res.push({type,...i}); });
-  }
-  return res.slice(0,30);
-}
-function memCtx() {
-  return Object.entries(GM).filter(([,v])=>Array.isArray(v)&&v.length)
-    .map(([k,v])=>`[${k}]: ${v.slice(-8).map(i=>i.content).join(' | ')}`).join('\n');
-}
-
-// ── KNOWLEDGE GRAPH ──────────────────────────────────────────────────────────
-const KG_FILE = path.join(DATA,'knowledge','graph.json');
-let KG = rj(KG_FILE, {nodes:[],edges:[]});
-function saveKG() { wj(KG_FILE, KG); }
-function kgNode(label, type) {
-  if (!KG.nodes.find(n=>n.label===label&&n.type===type)) {
-    KG.nodes.push({id:uid(),label,type,ts:new Date().toISOString()});
-    if (KG.nodes.length>10000) KG.nodes.splice(0,KG.nodes.length-10000);
-    saveKG();
-  }
-}
-
-// ── AGENTS ──────────────────────────────────────────────────────────────────
-const ROLES = {
-  orchestrator: {name:'Orchestrator', emoji:'🧠', model:'llama-3.3-70b-versatile', temp:0.2, desc:'Master coordinator. Plans missions, decomposes goals into task graphs, coordinates all agents.'},
-  researcher:   {name:'Researcher',   emoji:'🔍', model:'llama-3.3-70b-versatile', temp:0.3, desc:'Deep research specialist. Web search, fact verification, source analysis, knowledge extraction.'},
-  coder:        {name:'Code Engineer',emoji:'💻', model:'llama-3.3-70b-versatile', temp:0.1, desc:'Senior software engineer. Writes production-quality code, reviews, debugs, tests in any language.'},
-  analyst:      {name:'Data Analyst', emoji:'📊', model:'llama-3.3-70b-versatile', temp:0.3, desc:'Quantitative analyst. Data analysis, statistics, pattern detection, trend identification.'},
-  writer:       {name:'Writer',       emoji:'✍️', model:'llama-3.3-70b-versatile', temp:0.7, desc:'Expert writer. Technical docs, reports, copywriting, structured content.'},
-  planner:      {name:'Planner',      emoji:'📋', model:'llama-3.3-70b-versatile', temp:0.2, desc:'Strategic planner. Task decomposition, dependency mapping, timeline estimation.'},
-  critic:       {name:'Critic',       emoji:'🎯', model:'llama-3.3-70b-versatile', temp:0.3, desc:'Quality reviewer. Error detection, logical validation, improvement suggestions.'},
-  executor:     {name:'Executor',     emoji:'⚡', model:'llama-3.3-70b-versatile', temp:0.2, desc:'Task executor. Runs tools, manages files, executes code, handles system operations.'},
-  memory_agent: {name:'Memory Agent', emoji:'💾', model:'llama-3.1-8b-instant',    temp:0.1, desc:'Knowledge curator. Stores, retrieves, and indexes information across sessions.'},
-  optimizer:    {name:'Optimizer',    emoji:'🔧', model:'llama-3.3-70b-versatile', temp:0.3, desc:'Performance optimizer. Bottleneck detection, efficiency improvements.'},
-  security:     {name:'Security',     emoji:'🛡️', model:'llama-3.1-8b-instant',    temp:0.1, desc:'Security auditor. Validates safety, checks for risks, enforces constraints.'},
+// ── HELPERS ──────────────────────────────────────────────────────────────────
+const rj=(f,d={})=>{try{return JSON.parse(fs.readFileSync(f,'utf8'));}catch{return d;}};
+const wj=(f,d)=>fs.writeFileSync(f,JSON.stringify(d,null,2));
+const pa=(s)=>{try{return typeof s==='object'?s:JSON.parse(s||'{}');}catch{return {};}};
+const cm=(m)=>{
+  if(!m||typeof m!=='object') return null;
+  const r={role:m.role||'user'};
+  if(m.content!==undefined&&m.content!==null) r.content=typeof m.content==='string'?m.content:JSON.stringify(m.content);
+  if(m.tool_calls) r.tool_calls=m.tool_calls;
+  if(m.tool_call_id) r.tool_call_id=m.tool_call_id;
+  return r;
 };
 
-const AGENTS_FILE = path.join(DATA,'agents','registry.json');
-let AGENTS = rj(AGENTS_FILE, {});
-(()=>{
-  let changed=false;
-  for (const [role,cfg] of Object.entries(ROLES)) {
-    if (!AGENTS[role]) { AGENTS[role]={id:uid(),role,...cfg,status:'idle',tasksCompleted:0,tasksRunning:0,errors:0,created:new Date().toISOString(),lastActive:null,perf:{success:0,fail:0,avgMs:0}}; changed=true; }
+// ── DOMAIN ROUTING ───────────────────────────────────────────────────────────
+const DOMAINS={
+  code:     {model:'meta-llama/Llama-3.3-70B-Instruct-Turbo', keywords:['code','function','debug','build','deploy','app','software','program','algorithm','script','api','database','bug','error','implement']},
+  science:  {model:'meta-llama/Llama-3.3-70B-Instruct-Turbo', keywords:['physics','quantum','biology','chemistry','molecular','protein','dna','atom','particle','relativity','thermodynamics','mechanics']},
+  aerospace:{model:'meta-llama/Llama-3.3-70B-Instruct-Turbo', keywords:['aerospace','rocket','satellite','orbit','thrust','trajectory','flight','aerodynamics','propulsion','spacecraft','nasa','esa']},
+  math:     {model:'Qwen/Qwen2.5-7B-Instruct-Turbo',          keywords:['calculate','equation','integral','derivative','matrix','vector','proof','theorem','solve','formula','geometry','algebra']},
+  search:   {model:'meta-llama/Llama-3.3-70B-Instruct-Turbo', keywords:['latest','news','current','today','find','research','look up','what happened','recent','2025','2026']},
+  default:  {model:'meta-llama/Llama-3.3-70B-Instruct-Turbo', keywords:[]},
+};
+
+function routeModel(text){
+  const t=(text||'').toLowerCase();
+  for(const[domain,cfg]of Object.entries(DOMAINS)){
+    if(domain==='default') continue;
+    if(cfg.keywords.some(k=>t.includes(k))) return {domain, model:cfg.model};
   }
-  if (changed) wj(AGENTS_FILE, AGENTS);
-})();
-
-function agentList() {
-  return Object.values(AGENTS).map(a=>({
-    id:a.id,role:a.role,name:a.name,emoji:a.emoji,desc:a.desc,
-    status:a.status,tasksCompleted:a.tasksCompleted,tasksRunning:a.tasksRunning,
-    errors:a.errors,lastActive:a.lastActive,
-    successRate:a.perf.success>0?Math.round((a.perf.success/(a.perf.success+a.perf.fail))*100):null
-  }));
-}
-function agentUpd(role, upd) {
-  if (AGENTS[role]) { Object.assign(AGENTS[role],upd,{lastActive:new Date().toISOString()}); wj(AGENTS_FILE,AGENTS); }
-}
-
-// ── TASKS ────────────────────────────────────────────────────────────────────
-const TASKS_FILE = path.join(DATA,'tasks','registry.json');
-let TASKS = rj(TASKS_FILE, {});
-function saveTasks() { wj(TASKS_FILE, TASKS); }
-function taskNew(mId, role, desc) {
-  const t={id:uid(),mId,role,desc,status:'pending',result:null,error:null,created:new Date().toISOString(),started:null,completed:null,ms:0};
-  TASKS[t.id]=t; saveTasks(); return t;
+  return {domain:'default', model:DOMAINS.default.model};
 }
 
 // ── TOOLS ────────────────────────────────────────────────────────────────────
 const TOOLS=[
-  {type:'function',function:{name:'internet_search',description:'Search the internet for real-time information, news, and facts.',parameters:{type:'object',properties:{query:{type:'string',description:'The search query'}},required:['query']}}},
-  {type:'function',function:{name:'fetch_url',description:'Fetch and read the full text content of any webpage or URL.',parameters:{type:'object',properties:{url:{type:'string',description:'The URL to fetch'}},required:['url']}}},
-  {type:'function',function:{name:'execute_code',description:'Execute JavaScript code for calculations, data processing, or algorithms. Returns the result.',parameters:{type:'object',properties:{code:{type:'string',description:'JavaScript code to execute'},description:{type:'string',description:'What this code does'}},required:['code']}}},
-  {type:'function',function:{name:'remember',description:'Store important information in persistent long-term memory for future sessions.',parameters:{type:'object',properties:{type:{type:'string',enum:['facts','preferences','projects','notes','people','knowledge','decisions','patterns'],description:'Memory category'},content:{type:'string',description:'The information to store'}},required:['type','content']}}},
-  {type:'function',function:{name:'recall',description:'Search and retrieve information from persistent long-term memory.',parameters:{type:'object',properties:{query:{type:'string',description:'Search query to find relevant memories'}},required:['query']}}},
-  {type:'function',function:{name:'write_file',description:'Create a file (code, text, CSV, JSON, markdown, HTML) that the user can download. Always use this when generating code.',parameters:{type:'object',properties:{filename:{type:'string',description:'Filename with extension, e.g. app.py, report.md'},content:{type:'string',description:'Full file content'}},required:['filename','content']}}},
-  {type:'function',function:{name:'read_file',description:'Read the content of a previously created file.',parameters:{type:'object',properties:{filename:{type:'string',description:'Name of the file to read'}},required:['filename']}}},
-  {type:'function',function:{name:'list_files',description:'List all files created on this platform.',parameters:{type:'object',properties:{}}}},
-  {type:'function',function:{name:'create_skill',description:'Save reusable JavaScript logic as a named skill for future use.',parameters:{type:'object',properties:{name:{type:'string',description:'Skill name'},description:{type:'string',description:'What the skill does'},code:{type:'string',description:'JavaScript function body'}},required:['name','description','code']}}},
-  {type:'function',function:{name:'run_skill',description:'Execute a previously saved named skill.',parameters:{type:'object',properties:{name:{type:'string',description:'Skill name to run'},args:{type:'object',description:'Arguments to pass to the skill'}},required:['name']}}},
-  {type:'function',function:{name:'list_skills',description:'List all saved skills with their descriptions and usage stats.',parameters:{type:'object',properties:{}}}},
-  {type:'function',function:{name:'create_automation',description:'Schedule a recurring task using a cron expression.',parameters:{type:'object',properties:{name:{type:'string',description:'Automation name'},description:{type:'string',description:'What this automation does'},task:{type:'string',description:'The task to execute on each run'},cron:{type:'string',description:'Cron expression e.g. 0 9 * * 1-5 for weekdays at 9am'}},required:['name','task','cron']}}},
-  {type:'function',function:{name:'spawn_agent',description:'Spawn a specialized sub-agent to handle a specific task. Available roles: researcher, coder, analyst, writer, planner, critic, executor, optimizer.',parameters:{type:'object',properties:{role:{type:'string',description:'Agent role: researcher, coder, analyst, writer, planner, critic, executor, or optimizer'},task:{type:'string',description:'Detailed task description for the agent'}},required:['role','task']}}},
-  {type:'function',function:{name:'reason_deep',description:'Perform deep chain-of-thought reasoning on complex problems. Returns structured analysis with multiple approaches.',parameters:{type:'object',properties:{problem:{type:'string',description:'The problem or question to reason about deeply'}},required:['problem']}}},
-  {type:'function',function:{name:'analyze_image',description:'Analyze and describe an image from a URL using vision AI.',parameters:{type:'object',properties:{url:{type:'string',description:'Image URL'},question:{type:'string',description:'Question to ask about the image'}},required:['url']}}},
-  {type:'function',function:{name:'calculate',description:'Evaluate any mathematical expression and return the result.',parameters:{type:'object',properties:{expression:{type:'string',description:'Math expression to evaluate, e.g. 2+2 or Math.sqrt(144)'}},required:['expression']}}},
-  {type:'function',function:{name:'get_time',description:'Get the current date, time, and UTC timestamp.',parameters:{type:'object',properties:{}}}},
-  {type:'function',function:{name:'get_agents',description:'Get real-time status, performance metrics, and task counts for all specialized agents.',parameters:{type:'object',properties:{}}}},
-  {type:'function',function:{name:'create_project',description:'Create a new project workspace with goals and metadata.',parameters:{type:'object',properties:{name:{type:'string',description:'Project name'},description:{type:'string',description:'Project description'},goals:{type:'array',items:{type:'string'},description:'List of project goals'}},required:['name','description']}}},
-  {type:'function',function:{name:'evaluate_performance',description:'Run a benchmark evaluation on a specific AI capability and return performance metrics.',parameters:{type:'object',properties:{capability:{type:'string',description:'Capability to benchmark: reasoning, coding, memory, research, or planning'}},required:['capability']}}},
+  {type:'function',function:{name:'search',description:'Search the internet for real-time information, news, facts, and current events. Use this for any question about recent events, current data, or facts that need verification.',parameters:{type:'object',properties:{query:{type:'string',description:'The search query'},depth:{type:'string',enum:['basic','advanced'],description:'Search depth - use advanced for complex research'}},required:['query']}}},
+  {type:'function',function:{name:'run_code',description:'Execute code in a secure sandbox. Supports Python, JavaScript, bash. Returns output, errors, and any generated files.',parameters:{type:'object',properties:{language:{type:'string',enum:['python','javascript','bash'],description:'Programming language'},code:{type:'string',description:'The code to execute'},install:{type:'string',description:'Packages to install first (e.g. "numpy pandas matplotlib")'}},required:['language','code']}}},
+  {type:'function',function:{name:'build_app',description:'Build a complete working application or software. Generates all files, installs dependencies, runs tests. Returns a downloadable project.',parameters:{type:'object',properties:{name:{type:'string',description:'App name'},type:{type:'string',description:'Type: web-app, api, cli, data-analysis, visualization, automation'},description:{type:'string',description:'What the app should do'},tech:{type:'string',description:'Tech stack (e.g. "React + Node.js", "Python Flask", "FastAPI")'},requirements:{type:'string',description:'Detailed requirements'}},required:['name','type','description']}}},
+  {type:'function',function:{name:'analyze',description:'Deep analysis of any topic, problem, or domain. Provides expert-level reasoning for science, engineering, math, business, etc.',parameters:{type:'object',properties:{topic:{type:'string',description:'Topic or problem to analyze'},domain:{type:'string',description:'Domain: physics, aerospace, quantum, biology, engineering, finance, strategy'},depth:{type:'string',enum:['overview','deep','exhaustive'],description:'Analysis depth'}},required:['topic','domain']}}},
+  {type:'function',function:{name:'remember',description:'Store important information to long-term memory for future reference.',parameters:{type:'object',properties:{key:{type:'string',description:'Memory key/topic'},content:{type:'string',description:'Information to store'}},required:['key','content']}}},
+  {type:'function',function:{name:'recall',description:'Retrieve information from long-term memory.',parameters:{type:'object',properties:{query:{type:'string',description:'What to look for in memory'}},required:['query']}}},
+  {type:'function',function:{name:'write_file',description:'Create and save a file. Use for code, reports, data, configs, documents.',parameters:{type:'object',properties:{filename:{type:'string',description:'Filename with extension'},content:{type:'string',description:'File content'},description:{type:'string',description:'What this file is'}},required:['filename','content']}}},
+  {type:'function',function:{name:'read_file',description:'Read a previously saved file.',parameters:{type:'object',properties:{filename:{type:'string',description:'Filename to read'}},required:['filename']}}},
+  {type:'function',function:{name:'list_files',description:'List all saved files.',parameters:{type:'object',properties:{}}}},
+  {type:'function',function:{name:'calculate',description:'Perform mathematical calculations, solve equations, evaluate expressions.',parameters:{type:'object',properties:{expression:{type:'string',description:'Mathematical expression or equation to evaluate'}},required:['expression']}}},
+  {type:'function',function:{name:'get_time',description:'Get the current date and time.',parameters:{type:'object',properties:{}}}},
+  {type:'function',function:{name:'self_improve',description:'Analyze recent performance and update system prompts/strategies to improve future responses.',parameters:{type:'object',properties:{aspect:{type:'string',description:'What aspect to improve: accuracy, depth, speed, domain_knowledge'},feedback:{type:'string',description:'What went wrong or could be better'}},required:['aspect']}}},
 ];
 
-// ── TOOL RUNNER ──────────────────────────────────────────────────────────────
-async function runTool(name, args, sessionId) {
-  auditLog('info',`tool:${name}`,'call');
-  try {
-    switch(name) {
-      case 'internet_search': {
-        const q=args.query||'', count=8;
-        try {
-          const r=await axios.get('https://api.duckduckgo.com/',{params:{q,format:'json',no_html:1,skip_disambig:1},timeout:8000});
-          const res=[]; const d=r.data;
-          if(d.AbstractText) res.push({title:d.Heading||q,snippet:d.AbstractText,url:d.AbstractURL});
-          if(d.Answer) res.push({title:'Direct Answer',snippet:d.Answer,url:d.AbstractURL});
-          (d.RelatedTopics||[]).slice(0,count+2).forEach(t=>{
-            if(t.Text) res.push({title:t.Text.slice(0,60),snippet:t.Text,url:t.FirstURL||''});
-            if(t.Topics) t.Topics.forEach(st=>{if(st.Text)res.push({title:st.Text.slice(0,60),snippet:st.Text,url:st.FirstURL||''});});
+// ── TOOL EXECUTOR ─────────────────────────────────────────────────────────────
+async function runTool(name,args,sessionId){
+  try{
+    switch(name){
+
+      case 'search':{
+        const tk=process.env.TAVILY_API_KEY;
+        if(!tk) return {success:false,error:'Tavily API key not configured'};
+        const r=await fetch('https://api.tavily.com/search',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({api_key:tk,query:args.query,search_depth:args.depth||'basic',max_results:6,include_answer:true})
+        });
+        const d=await r.json();
+        return {success:true,query:args.query,answer:d.answer||null,results:(d.results||[]).slice(0,6).map(r=>({title:r.title,snippet:r.content?.slice(0,300),url:r.url,score:r.score}))};
+      }
+
+      case 'run_code':{
+        const ek=process.env.E2B_API_KEY;
+        if(!ek) return {success:false,error:'E2B API key not configured'};
+        // Create sandbox
+        const createResp=await fetch('https://api.e2b.dev/sandboxes',{
+          method:'POST',
+          headers:{'X-API-Key':ek,'Content-Type':'application/json'},
+          body:JSON.stringify({templateID:'base',metadata:{sessionId}})
+        });
+        const sandbox=await createResp.json();
+        const sid=sandbox.sandboxID||sandbox.id;
+        if(!sid) return {success:false,error:'Failed to create sandbox: '+JSON.stringify(sandbox).slice(0,100)};
+
+        // Install packages if needed
+        if(args.install){
+          const lang=args.language||'python';
+          const installCmd=lang==='python'?`pip install ${args.install} -q`:`npm install ${args.install} --silent`;
+          await fetch(`https://api.e2b.dev/sandboxes/${sid}/process`,{
+            method:'POST',
+            headers:{'X-API-Key':ek,'Content-Type':'application/json'},
+            body:JSON.stringify({cmd:installCmd,timeout:30})
           });
-          return {success:true,query:q,results:res.filter(r=>r.snippet).slice(0,count),total:res.length};
-        } catch(e) { return {success:false,query:q,error:e.message,results:[]}; }
-      }
-      case 'fetch_url': {
-        const url=args.url||'';
-        try {
-          const r=await axios.get(url,{timeout:12000,maxContentLength:1000000,headers:{'User-Agent':'Mozilla/5.0 AGII/15'}});
-          let t=typeof r.data==='string'?r.data:JSON.stringify(r.data);
-          t=t.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,'').replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,12000);
-          return {success:true,url,content:t,length:t.length};
-        } catch(e) { return {success:false,url,error:e.message}; }
-      }
-      case 'execute_code': {
-        try {
-          const fn=new Function('Math','Date','JSON','parseInt','parseFloat','Number','String','Array','Object','Boolean',
-            `"use strict";\n${(args.code||'').includes('return')?args.code:'return ('+args.code+')'}`);
-          const res=fn(Math,Date,JSON,parseInt,parseFloat,Number,String,Array,Object,Boolean);
-          return {success:true,description:args.description,result:String(res).slice(0,5000)};
-        } catch(e) { return {success:false,description:args.description,error:e.message}; }
-      }
-      case 'remember': {
-        const e=memAdd(args.type||'notes',args.content||'');
-        kgNode((args.content||'').slice(0,80),args.type||'notes');
-        return {success:true,stored:!!e,type:args.type};
-      }
-      case 'recall': { return {success:true,query:args.query,results:memSearch(args.query||'')}; }
-      case 'write_file': {
-        const fn=(args.filename||'file.txt').replace(/[^a-zA-Z0-9._\-]/g,'_');
-        fs.writeFileSync(path.join(DATA,'files',fn),args.content||'','utf8');
-        return {success:true,filename:fn,size:(args.content||'').length,downloadUrl:`/api/files/${fn}`};
-      }
-      case 'read_file': {
-        const fn=(args.filename||'').replace(/[^a-zA-Z0-9._\-]/g,'_');
-        const fp=path.join(DATA,'files',fn);
-        if(!fs.existsSync(fp)) return {success:false,error:'File not found'};
-        return {success:true,filename:fn,content:fs.readFileSync(fp,'utf8').slice(0,15000)};
-      }
-      case 'list_files': {
-        const files=fs.readdirSync(path.join(DATA,'files')).map(f=>{const s=fs.statSync(path.join(DATA,'files',f));return{name:f,size:s.size,modified:s.mtime,url:`/api/files/${f}`};});
-        return {success:true,files,count:files.length};
-      }
-      case 'create_skill': {
-        const SK=rj(path.join(DATA,'skills','registry.json'),{});
-        const id=(args.name||'skill').replace(/[^a-zA-Z0-9_]/g,'_');
-        SK[id]={id,name:args.name,description:args.description||'',code:args.code,created:new Date().toISOString(),runCount:0};
-        wj(path.join(DATA,'skills','registry.json'),SK);
-        return {success:true,id,name:args.name};
-      }
-      case 'run_skill': {
-        const SK=rj(path.join(DATA,'skills','registry.json'),{});
-        const skill=SK[args.name];
-        if(!skill) return {success:false,error:`Skill '${args.name}' not found`};
-        try {
-          const fn=new Function('args','Math','JSON',skill.code);
-          const r=fn(args.args||{},Math,JSON);
-          skill.runCount=(skill.runCount||0)+1; skill.lastRun=new Date().toISOString();
-          wj(path.join(DATA,'skills','registry.json'),SK);
-          return {success:true,name:args.name,result:String(r).slice(0,5000)};
-        } catch(e) { return {success:false,name:args.name,error:e.message}; }
-      }
-      case 'list_skills': {
-        const SK=rj(path.join(DATA,'skills','registry.json'),{});
-        return {success:true,skills:Object.values(SK).map(s=>({name:s.name,description:s.description,runCount:s.runCount}))};
-      }
-      case 'create_automation': {
-        const AU=rj(path.join(DATA,'automations','registry.json'),{});
-        const id=uid();
-        AU[id]={id,name:args.name,description:args.description||'',task:args.task,cron:args.cron,active:true,created:new Date().toISOString(),runCount:0,lastRun:null,lastResult:null};
-        wj(path.join(DATA,'automations','registry.json'),AU);
-        // Refresh live registry and schedule
-        AUTO_REG=rj(path.join(DATA,'automations','registry.json'),{});
-        scheduleAuto(AUTO_REG[id]);
-        return {success:true,id,name:args.name,cron:args.cron,message:`Automation "${args.name}" created and scheduled.`};
-      }
-      case 'spawn_agent': {
-        const task=taskNew(uid(),args.role||'executor',args.task||'');
-        const res=await runAgentTask(task,sessionId,null);
-        return {success:res.success,role:args.role,result:res.result,error:res.error};
-      }
-      case 'reason_deep': {
-        const c=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages:[{role:'system',content:'You are a deep reasoning engine. Think step by step, consider multiple angles, and produce rigorous structured analysis.'},{role:'user',content:`Problem:\n\n${args.problem}\n\nProvide:\n1. Problem decomposition\n2. Key considerations\n3. Multiple approaches\n4. Recommended approach with justification\n5. Risks and mitigations`}],temperature:0.3,max_tokens:3000});
-        return {success:true,reasoning:c.choices[0].message.content};
-      }
-      case 'analyze_image': {
-        const c=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages:[{role:'user',content:[{type:'image_url',image_url:{url:args.url}},{type:'text',text:args.question||'Analyze this image in detail.'}]}],max_tokens:1500});
-        return {success:true,analysis:c.choices[0].message.content};
-      }
-      case 'calculate': {
-        try { return {success:true,expression:args.expression,result:Function('"use strict";return ('+args.expression+')')()}; }
-        catch(e) { return {success:false,expression:args.expression,error:e.message}; }
-      }
-      case 'get_time': {
-        const n=new Date();
-        return {success:true,iso:n.toISOString(),utc:n.toUTCString(),unix:n.getTime(),date:n.toDateString(),time:n.toTimeString()};
-      }
-      case 'get_agents': { return {success:true,agents:agentList()}; }
-      case 'create_project': {
-        const PR=rj(path.join(DATA,'projects','registry.json'),{});
-        const id=uid();
-        PR[id]={id,name:args.name,description:args.description,goals:args.goals||[],status:'active',created:new Date().toISOString()};
-        wj(path.join(DATA,'projects','registry.json'),PR);
-        return {success:true,id,name:args.name,message:`Project "${args.name}" created.`};
-      }
-      case 'evaluate_performance': {
-        const cap=args.capability||'reasoning';
-        const benchmarks={
-          reasoning:'Solve this step by step: If a train travels 120km in 1.5 hours, then stops for 30 minutes, then travels 80km in 1 hour, what is the average speed for the entire journey including the stop? Show your work.',
-          coding:'Write a Python function that takes a list of integers and returns the longest increasing subsequence. Include proper type hints, edge case handling, and time complexity analysis.',
-          memory:'Given these facts: Alice is Bob\'s sister. Bob is married to Carol. Carol has a daughter named Diana. What is Alice\'s relationship to Diana? Explain your reasoning step by step.',
-          research:'Explain the key differences between transformer and state-space model architectures for sequence modeling. Cover attention mechanisms, computational complexity, and practical trade-offs.',
-          planning:'You need to build a web application with user auth, a database, and a REST API. Create a detailed project plan with task dependencies, estimated times, and risk factors.'
-        };
-        const prompt=benchmarks[cap]||benchmarks.reasoning;
-        try {
-          const t0=Date.now();
-          const comp=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages:[{role:'system',content:'You are being evaluated. Provide the best possible answer. Be thorough, accurate, and complete.'},{role:'user',content:prompt}],temperature:0.3,max_tokens:2000});
-          const answer=comp.choices[0].message.content;
-          const latency=Date.now()-t0;
-          const evalComp=await groq.chat.completions.create({model:'llama-3.1-8b-instant',messages:[{role:'system',content:'You are an objective AI evaluator. Score the following answer on a scale of 0-100. Return ONLY a JSON object with: {"score": <number>, "completeness": <0-100>, "correctness": <0-100>, "quality": <0-100>, "feedback": "<brief feedback>"}. Return valid JSON only.'},{role:'user',content:`Task: ${prompt}\n\nAnswer:\n${answer}`}],temperature:0.1,max_tokens:300,response_format:{type:'json_object'}});
-          let scores;
-          try { scores=JSON.parse(evalComp.choices[0].message.content); } catch { scores={score:75,completeness:75,correctness:75,quality:75,feedback:'Evaluation parse error'}; }
-          const score=typeof scores.score==='number'?Math.min(100,Math.max(0,scores.score)):75;
-          const EV=rj(path.join(DATA,'evaluations','history.json'),[]);
-          EV.push({id:uid(),capability:cap,score,completeness:scores.completeness,correctness:scores.correctness,quality:scores.quality,feedback:scores.feedback,latencyMs:latency,ts:new Date().toISOString(),version:'v15'});
-          if(EV.length>1000) EV.splice(0,EV.length-1000);
-          wj(path.join(DATA,'evaluations','history.json'),EV);
-          return {success:true,capability:cap,score,pass:score>=70,details:scores,latencyMs:latency,ts:new Date().toISOString()};
-        } catch(e) { return {success:false,capability:cap,error:e.message}; }
-      }
-      default: return {success:false,error:`Unknown tool: ${name}`};
-    }
-  } catch(e) { auditLog('error',`tool:${name}`,e.message); return {success:false,error:e.message}; }
-}
-
-// ── AGENT TASK RUNNER ────────────────────────────────────────────────────────
-async function runAgentTask(task, sessionId, send) {
-  const agent=AGENTS[task.role];
-  if(!agent) return {success:false,error:`No agent: ${task.role}`};
-  const t0=Date.now();
-  task.status='running'; task.started=new Date().toISOString(); saveTasks();
-  agentUpd(task.role,{status:'working',tasksRunning:(agent.tasksRunning||0)+1});
-  if(send) send({type:'agent_start',agent:agent.name,emoji:agent.emoji,role:task.role,task:task.desc.slice(0,100)});
-  try {
-    const messages=[
-      {role:'system',content:`You are ${agent.name} (${agent.emoji}). ${agent.desc}\nTask: ${task.desc}\nExecute with precision. Use tools when needed.`},
-      {role:'user',content:task.desc}
-    ];
-    let result=''; let itr=0;
-    while(itr<6) {
-      itr++;
-      const comp=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages,tools:TOOLS,tool_choice:'auto',temperature:agent.temp||0.4,max_tokens:3000,parallel_tool_calls:false});
-      const choice=comp.choices[0]; const msg=choice.message;
-      messages.push(cm(msg));
-      if(choice.finish_reason==='tool_calls'&&msg.tool_calls) {
-        for(const tc of msg.tool_calls) {
-          const a=pa(tc.function.arguments);
-          if(send) send({type:'agent_tool',agent:agent.name,emoji:agent.emoji,tool:tc.function.name});
-          const tr=await runTool(tc.function.name,a,sessionId);
-          messages.push({role:'tool',tool_call_id:tc.id,content:JSON.stringify(tr)});
         }
-      } else { result=msg.content||''; break; }
-    }
-    const ms=Date.now()-t0;
-    task.status='completed'; task.result=result; task.completed=new Date().toISOString(); task.ms=ms; saveTasks();
-    const p=agent.perf||{success:0,fail:0,avgMs:0};
-    p.success=(p.success||0)+1; p.avgMs=Math.round(((p.avgMs||0)*(p.success-1)+ms)/p.success);
-    agentUpd(task.role,{status:'idle',tasksCompleted:(agent.tasksCompleted||0)+1,tasksRunning:Math.max(0,(agent.tasksRunning||1)-1),perf:p});
-    if(send) send({type:'agent_done',agent:agent.name,emoji:agent.emoji,role:task.role,ms});
-    return {success:true,result,ms};
-  } catch(e) {
-    const ms=Date.now()-t0;
-    task.status='failed'; task.error=e.message; task.completed=new Date().toISOString(); saveTasks();
-    agentUpd(task.role,{status:'idle',errors:(agent.errors||0)+1,tasksRunning:Math.max(0,(agent.tasksRunning||1)-1)});
-    return {success:false,error:e.message,ms};
-  }
-}
 
-// ── MISSION ORCHESTRATOR ─────────────────────────────────────────────────────
-async function runMission(desc, sessionId, send) {
-  const mId=uid();
-  agentUpd('orchestrator',{status:'planning'});
-  if(send) send({type:'mission_start',missionId:mId});
-  try {
-    const planComp=await groq.chat.completions.create({
-      model:'llama-3.3-70b-versatile',
-      messages:[
-        {role:'system',content:'You are a mission planning AI. Return ONLY valid JSON.'},
-        {role:'user',content:`Mission: "${desc}"\n\nCreate optimal task graph with 2-5 tasks.\n\nReturn:\n{"plan":"brief strategy","tasks":[{"role":"researcher|coder|analyst|writer|planner|critic|executor|optimizer","desc":"specific detailed task description","deps":[]}]}\n\nDeps = zero-based indices of tasks that must complete first.`}
-      ],
-      temperature:0.2, max_tokens:1000, response_format:{type:'json_object'}
-    });
-    const plan=JSON.parse(planComp.choices[0].message.content);
-    agentUpd('orchestrator',{status:'coordinating',tasksCompleted:(AGENTS.orchestrator?.tasksCompleted||0)+1});
-    if(send) send({type:'mission_plan',plan:plan.plan,taskCount:plan.tasks?.length||0});
-    const tasks=(plan.tasks||[]).map(t=>taskNew(mId,t.role||'executor',t.desc||t.description||''));
-    const done=new Set(); const results={};
-    let tries=0;
-    while(done.size<tasks.length&&tries<tasks.length*5) {
-      tries++;
-      let progress=false;
-      for(let i=0;i<tasks.length;i++) {
-        const task=tasks[i];
-        if(done.has(task.id)){continue;}
-        if(task.status==='failed'){done.add(task.id);continue;}
-        const depsOk=(plan.tasks[i].deps||[]).every(d=>tasks[d]&&done.has(tasks[d].id));
-        if(depsOk&&task.status==='pending'){results[i]=await runAgentTask(task,sessionId,send);done.add(task.id);progress=true;}
+        // Write and run code
+        const lang=args.language||'python';
+        const ext=lang==='python'?'py':lang==='javascript'?'js':'sh';
+        const filename=`code.${ext}`;
+        
+        // Write file
+        await fetch(`https://api.e2b.dev/sandboxes/${sid}/files?path=/home/user/${filename}`,{
+          method:'POST',
+          headers:{'X-API-Key':ek,'Content-Type':'text/plain'},
+          body:args.code
+        });
+
+        // Execute
+        const cmd=lang==='python'?`python3 /home/user/${filename}`:
+                  lang==='javascript'?`node /home/user/${filename}`:
+                  `bash /home/user/${filename}`;
+        const execResp=await fetch(`https://api.e2b.dev/sandboxes/${sid}/process`,{
+          method:'POST',
+          headers:{'X-API-Key':ek,'Content-Type':'application/json'},
+          body:JSON.stringify({cmd,timeout:30})
+        });
+        const execResult=await execResp.json();
+        
+        // Kill sandbox
+        await fetch(`https://api.e2b.dev/sandboxes/${sid}`,{method:'DELETE',headers:{'X-API-Key':ek}}).catch(()=>{});
+
+        return {
+          success:true,
+          language:lang,
+          output:execResult.stdout||execResult.output||'',
+          error:execResult.stderr||'',
+          exitCode:execResult.exitCode??execResult.exit_code??0
+        };
       }
-      if(!progress) await new Promise(r=>setTimeout(r,100));
+
+      case 'build_app':{
+        const projectId=uid().slice(0,8);
+        const projectDir=path.join(DATA,'projects',projectId);
+        fs.mkdirSync(projectDir,{recursive:true});
+        
+        // Use AI to generate the full app
+        const buildPrompt=`You are an expert software engineer. Build a complete, production-ready ${args.type||'web app'} called "${args.name}".
+
+Requirements: ${args.requirements||args.description}
+Tech stack: ${args.tech||'auto-select best'}
+
+Generate ALL files needed. For each file output EXACTLY in this format:
+===FILE: filename.ext===
+[file content here]
+===END===
+
+Include: main application file, any config files, package.json or requirements.txt, README.md with setup instructions.
+Make it complete, working, and professional.`;
+
+        const buildResp=await fetch('https://api.together.xyz/v1/chat/completions',{
+          method:'POST',
+          headers:{'Authorization':`Bearer ${process.env.TOGETHER_API_KEY}`,'Content-Type':'application/json'},
+          body:JSON.stringify({
+            model:'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+            messages:[{role:'user',content:buildPrompt}],
+            max_tokens:8000,temperature:0.2
+          })
+        });
+        const buildData=await buildResp.json();
+        const buildOutput=buildData.choices?.[0]?.message?.content||'';
+        
+        // Parse and save files
+        const fileMatches=[...buildOutput.matchAll(/===FILE: (.+?)===\n([\s\S]+?)\n===END===/g)];
+        const savedFiles=[];
+        for(const[,fname,content]of fileMatches){
+          const fp=path.join(projectDir,fname.trim());
+          fs.mkdirSync(path.dirname(fp),{recursive:true});
+          fs.writeFileSync(fp,content.trim());
+          savedFiles.push(fname.trim());
+        }
+
+        // Save metadata
+        wj(path.join(projectDir,'_meta.json'),{
+          id:projectId, name:args.name, type:args.type, created:new Date().toISOString(),
+          files:savedFiles, description:args.description
+        });
+
+        return {
+          success:true, projectId, name:args.name,
+          files:savedFiles, fileCount:savedFiles.length,
+          message:`Built ${savedFiles.length} files for "${args.name}"`,
+          downloadNote:`Project saved. Files: ${savedFiles.join(', ')}`
+        };
+      }
+
+      case 'analyze':{
+        const analyzeResp=await fetch('https://api.together.xyz/v1/chat/completions',{
+          method:'POST',
+          headers:{'Authorization':`Bearer ${process.env.TOGETHER_API_KEY}`,'Content-Type':'application/json'},
+          body:JSON.stringify({
+            model:'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+            messages:[
+              {role:'system',content:`You are a world-class expert in ${args.domain}. Provide rigorous, detailed, technically accurate analysis. Use equations, data, and specific examples. Depth level: ${args.depth||'deep'}.`},
+              {role:'user',content:`Analyze: ${args.topic}`}
+            ],
+            max_tokens:4000,temperature:0.3
+          })
+        });
+        const aData=await analyzeResp.json();
+        return {success:true,analysis:aData.choices?.[0]?.message?.content||'Analysis failed',domain:args.domain,topic:args.topic};
+      }
+
+      case 'remember':{
+        const memFile=path.join(DATA,'memory','global.json');
+        const mem=rj(memFile,{});
+        mem[args.key]={content:args.content,updated:new Date().toISOString()};
+        wj(memFile,mem);
+        return {success:true,stored:args.key};
+      }
+
+      case 'recall':{
+        const memFile=path.join(DATA,'memory','global.json');
+        const mem=rj(memFile,{});
+        const q=args.query.toLowerCase();
+        const matches=Object.entries(mem).filter(([k,v])=>k.toLowerCase().includes(q)||v.content?.toLowerCase().includes(q));
+        return {success:true,found:matches.length,memories:matches.map(([k,v])=>({key:k,content:v.content,updated:v.updated}))};
+      }
+
+      case 'write_file':{
+        const f=path.join(DATA,'files',args.filename);
+        fs.mkdirSync(path.dirname(f),{recursive:true});
+        fs.writeFileSync(f,args.content);
+        return {success:true,filename:args.filename,size:args.content.length,message:`File saved: ${args.filename}`};
+      }
+
+      case 'read_file':{
+        const f=path.join(DATA,'files',args.filename);
+        if(!fs.existsSync(f)) return {success:false,error:`File not found: ${args.filename}`};
+        return {success:true,filename:args.filename,content:fs.readFileSync(f,'utf8')};
+      }
+
+      case 'list_files':{
+        const filesDir=path.join(DATA,'files');
+        const files=fs.existsSync(filesDir)?fs.readdirSync(filesDir).map(f=>{
+          const stat=fs.statSync(path.join(filesDir,f));
+          return {name:f,size:stat.size,modified:stat.mtime};
+        }):[];
+        const projectsDir=path.join(DATA,'projects');
+        const projects=fs.existsSync(projectsDir)?fs.readdirSync(projectsDir).filter(d=>{
+          return fs.existsSync(path.join(projectsDir,d,'_meta.json'));
+        }).map(d=>rj(path.join(projectsDir,d,'_meta.json'))):[];
+        return {success:true,files,projects};
+      }
+
+      case 'calculate':{
+        const result=Function('"use strict";return ('+args.expression+')')();
+        return {success:true,expression:args.expression,result};
+      }
+
+      case 'get_time':{
+        return {success:true,time:new Date().toISOString(),timestamp:Date.now()};
+      }
+
+      case 'self_improve':{
+        const improveFile=path.join(DATA,'memory','improvements.json');
+        const improvements=rj(improveFile,[]);
+        improvements.push({aspect:args.aspect,feedback:args.feedback,timestamp:new Date().toISOString()});
+        wj(improveFile,improvements);
+        // Update system context based on feedback
+        const sysFile=path.join(DATA,'memory','system_context.json');
+        const sysCtx=rj(sysFile,{improvements:[],version:1});
+        sysCtx.improvements.push({aspect:args.aspect,feedback:args.feedback});
+        sysCtx.version=(sysCtx.version||0)+1;
+        sysCtx.lastImproved=new Date().toISOString();
+        wj(sysFile,sysCtx);
+        return {success:true,message:'Self-improvement logged and applied',version:sysCtx.version,aspect:args.aspect};
+      }
+
+      default:
+        return {success:false,error:`Unknown tool: ${name}`};
     }
-    agentUpd('orchestrator',{status:'idle'});
-    const synthesis=Object.entries(results).filter(([,r])=>r.success).map(([i,r])=>`[${plan.tasks[i]?.role||'agent'}]: ${r.result}`).join('\n\n---\n\n');
-    return {missionId:mId,plan:plan.plan,tasks:tasks.length,synthesis};
-  } catch(e) {
-    agentUpd('orchestrator',{status:'idle'});
-    auditLog('error','mission',e.message);
-    return null;
+  } catch(e){
+    return {success:false,error:e.message||String(e)};
   }
 }
 
-// ── PERSONAS ─────────────────────────────────────────────────────────────────
-const PERSONAS_FILE=path.join(DATA,'personas','registry.json');
-let PERSONAS=rj(PERSONAS_FILE,{default:{id:'default',name:'AGII',avatar:'🤖',model:'llama-3.3-70b-versatile',temperature:0.7,systemPrompt:`You are AGII — a production-grade distributed AI agent platform built for real work.\n\nYou have 11 specialized agents you can coordinate, persistent memory across sessions, real tool execution (web search, code execution, file creation, URL fetching), and multi-agent mission orchestration.\n\nYour principles:\n- Use tools proactively whenever relevant. Always execute tools rather than describing what you would do.\n- For complex tasks, spawn specialized agents or run reason_deep first.\n- Store important information to memory automatically.\n- Create downloadable files when producing code, reports, or structured data.\n- Be direct, precise, and thorough. Show what tools you used.\n- When producing code, always write it to a file using write_file so the user can download it.`,created:new Date().toISOString()}});
-function savePersonas(){wj(PERSONAS_FILE,PERSONAS);}
+// ── SYSTEM PROMPT ─────────────────────────────────────────────────────────────
+function buildSystemPrompt(){
+  const sysCtx=rj(path.join(DATA,'memory','system_context.json'),{improvements:[],version:1});
+  const memCtx=rj(path.join(DATA,'memory','global.json'),{});
+  const memSummary=Object.entries(memCtx).slice(-10).map(([k,v])=>`- ${k}: ${v.content?.slice(0,100)}`).join('\n');
+  
+  return `You are NEXUS — the world's most advanced self-optimizing AI agent. You operate across every domain of human knowledge and capability.
 
-// ── SESSIONS ─────────────────────────────────────────────────────────────────
-const SC={};
-function sessGet(id,personaId='default'){
-  if(!SC[id]){
+Your capabilities:
+- Real-time web search with Tavily (search tool)
+- Execute code in any language in a live E2B sandbox (run_code tool)
+- Build complete production applications and software (build_app tool)  
+- Deep expert analysis across all scientific and engineering domains (analyze tool)
+- Persistent long-term memory across all conversations (remember/recall tools)
+- Self-optimization: you improve your own performance over time (self_improve tool)
+
+Your domains of expertise:
+SCIENCE: Quantum physics, quantum computing, relativity, thermodynamics, particle physics, cosmology
+ENGINEERING: Aerospace, propulsion, orbital mechanics, structural engineering, robotics, control systems
+BIOLOGY: Molecular biology, genetics, protein folding, neuroscience, pharmacology, bioinformatics
+MATHEMATICS: Pure math, applied math, numerical methods, statistics, optimization, topology
+TECHNOLOGY: Software architecture, distributed systems, AI/ML, cybersecurity, blockchain, cloud
+BUSINESS: Strategy, finance, market analysis, growth, operations, venture capital
+
+How you operate:
+- You ALWAYS use tools when they give better results than your training knowledge
+- For anything requiring current data → use search
+- For any code task → write and actually run it with run_code
+- For complex apps → use build_app to generate the full project
+- For deep scientific questions → use analyze with domain expertise
+- You store important context to memory automatically
+- After difficult tasks, you self-improve to do better next time
+- You are direct, technically precise, and deliver real results
+
+Self-improvement history: ${sysCtx.improvements.length} optimizations applied (v${sysCtx.version})
+${memSummary?`\nPersistent memory:\n${memSummary}`:''}
+Current time: ${new Date().toISOString()}`;
+}
+
+// ── XML TOOL CALL PARSER (Groq fallback) ──────────────────────────────────────
+function parseXmlToolCall(fg){
+  if(!fg) return null;
+  // <function=toolname {"args"}> or <function=toolname({"args"})>
+  const m=fg.match(/<function=([a-zA-Z_]+)\s*[({]?\s*(\{[\s\S]*?\})\s*[)}]?\s*<\/function>/);
+  if(!m) return null;
+  try{ return {name:m[1],args:JSON.parse(m[2])}; }catch{ return null; }
+}
+
+// ── SESSION MANAGEMENT ────────────────────────────────────────────────────────
+const SESSIONS={};
+function getSession(id){
+  if(!SESSIONS[id]){
     const f=path.join(DATA,'sessions',`${id}.json`);
-    const p=PERSONAS[personaId]||PERSONAS['default'];
-    SC[id]=rj(f,{id,messages:[],title:'New Conversation',created:new Date().toISOString(),model:p.model,personaId,pinned:false,missionIds:[],messageCount:0});
+    SESSIONS[id]=rj(f,{id,messages:[],title:'New Chat',created:new Date().toISOString(),model:null});
   }
-  return SC[id];
+  return SESSIONS[id];
 }
-function sessSave(id){const s=SC[id];if(s)wj(path.join(DATA,'sessions',`${s.id}.json`),s);}
-function sessList(){
-  try {
-    return fs.readdirSync(path.join(DATA,'sessions')).filter(f=>f.endsWith('.json'))
-      .map(f=>{const d=rj(path.join(DATA,'sessions',f));return{id:d.id,title:d.title||'Untitled',created:d.created,messageCount:d.messages?.length||0,pinned:d.pinned||false,lastMessage:d.messages?.slice(-1)[0]?.content?.toString().slice(0,100)||''};})
-      .filter(s=>s.id).sort((a,b)=>new Date(b.created)-new Date(a.created));
-  } catch {return [];}
+function saveSession(id){
+  const s=SESSIONS[id];
+  if(s) wj(path.join(DATA,'sessions',`${id}.json`),s);
 }
 
-// ── MAIN AGENT LOOP ──────────────────────────────────────────────────────────
-async function agentLoop(session, sessionId, send) {
-  const persona=PERSONAS[session.personaId||'default']||PERSONAS['default'];
-  const mc=memCtx();
-  const sys=`${persona.systemPrompt}\n\nCurrent date/time: ${new Date().toISOString()}\n${mc?`\nPersistent memory:\n${mc}`:''}`;
-  const messages=[{role:'system',content:sys},...session.messages.slice(-24).map(cm)];
+// ── MAIN AGENT LOOP ───────────────────────────────────────────────────────────
+async function agentLoop(session,sessionId,send){
+  const sys=buildSystemPrompt();
+  const messages=[{role:'system',content:sys},...session.messages.slice(-30).map(cm).filter(Boolean)];
   let finalResponse=''; let itr=0;
-  // Helper: parse XML-format tool calls from Groq's failed_generation
-  function parseXmlToolCall(fg) {
-    // Matches: <function=TOOLNAME {"key":"val"}> or <function=TOOLNAME({"key":"val"})>
-    const m = fg && fg.match(/<function=([\w_]+)[\s({]*(\{.*?\})[)\s]*<\/function>/s);
-    if (!m) return null;
-    try { return {name:m[1], args:JSON.parse(m[2])}; } catch { return null; }
-  }
 
-  while(itr<12){
+  while(itr<15){
     itr++;
-    const toolModel=session.model||'llama-3.3-70b-versatile';
-    let comp, compErr=null;
-    try {
-      comp=await groq.chat.completions.create({model:toolModel,messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096,parallel_tool_calls:false});
-    } catch(e) {
-      compErr = e;
-      // Try to parse XML tool call from the error
-      const errBody = e?.error?.failed_generation || (e?.message?.includes('failed_generation') ? e.message : null);
-      const xmlCall = errBody && parseXmlToolCall(errBody);
-      if (xmlCall) {
+    // Smart model routing based on last user message
+    const lastUser=session.messages.filter(m=>m.role==='user').slice(-1)[0];
+    const {model}=routeModel(lastUser?.content||'');
+    
+    let comp,compError=null;
+    try{
+      // Try Groq first (fastest)
+      comp=await groq.chat.completions.create({
+        model:'llama-3.3-70b-versatile',
+        messages,tools:TOOLS,tool_choice:'auto',
+        temperature:0.7,max_tokens:4096,
+        parallel_tool_calls:false
+      });
+    } catch(e){
+      compError=e;
+      // Parse XML tool call from Groq error
+      const errStr=JSON.stringify(e);
+      const fgMatch=errStr.match(/failed_generation['":\s]+([^"]+)/);
+      const fg=fgMatch?fgMatch[1].replace(/\\n/g,'\n').replace(/\\"/g,'"'):null;
+      const xmlCall=fg&&parseXmlToolCall(fg);
+      if(xmlCall){
         if(send) send({type:'tool_start',tool:xmlCall.name,args:xmlCall.args});
         const tr=await runTool(xmlCall.name,xmlCall.args,sessionId);
-        if(send) send({type:'tool_result',tool:xmlCall.name,result:tr,success:tr.success});
-        // Inject as assistant+tool into messages and continue
-        const fakeId='call_'+Math.random().toString(36).slice(2);
+        if(send) send({type:'tool_result',tool:xmlCall.name,result:tr,success:tr.success!==false});
+        const fakeId='call_'+Math.random().toString(36).slice(2,10);
         messages.push({role:'assistant',content:null,tool_calls:[{id:fakeId,type:'function',function:{name:xmlCall.name,arguments:JSON.stringify(xmlCall.args)}}]});
         messages.push({role:'tool',tool_call_id:fakeId,content:JSON.stringify(tr)});
         continue;
       }
-      throw e;
+      // Fallback to Together AI
+      try{
+        const togResp=await fetch('https://api.together.xyz/v1/chat/completions',{
+          method:'POST',
+          headers:{'Authorization':`Bearer ${process.env.TOGETHER_API_KEY}`,'Content-Type':'application/json'},
+          body:JSON.stringify({model,messages:messages.map(m=>({role:m.role,content:m.content||''})).filter(m=>m.role!=='tool'),max_tokens:4096,temperature:0.7,stream:false})
+        });
+        const togData=await togResp.json();
+        finalResponse=togData.choices?.[0]?.message?.content||'';
+        break;
+      }catch(e2){
+        throw new Error(`Both Groq and Together AI failed: ${e.message}`);
+      }
     }
-    const choice=comp.choices[0]; const msg=choice.message;
+
+    const choice=comp.choices[0];
+    const msg=choice.message;
     messages.push(cm(msg));
-    if(choice.finish_reason==='tool_calls'&&msg.tool_calls){
+
+    if(choice.finish_reason==='tool_calls'&&msg.tool_calls?.length){
       for(const tc of msg.tool_calls){
         const a=pa(tc.function.arguments);
         if(send) send({type:'tool_start',tool:tc.function.name,args:a});
         const tr=await runTool(tc.function.name,a,sessionId);
-        if(send) send({type:'tool_result',tool:tc.function.name,result:tr,success:tr.success});
+        if(send) send({type:'tool_result',tool:tc.function.name,result:tr,success:tr.success!==false});
         messages.push({role:'tool',tool_call_id:tc.id,content:JSON.stringify(tr)});
       }
-    } else {finalResponse=msg.content||'';break;}
+    } else {
+      finalResponse=msg.content||'';
+      break;
+    }
   }
   return finalResponse;
 }
 
-// ── AUTOMATIONS ──────────────────────────────────────────────────────────────
-let AUTO_REG=rj(path.join(DATA,'automations','registry.json'),{});
-const CRON_JOBS={};
-function saveAutoReg(){wj(path.join(DATA,'automations','registry.json'),AUTO_REG);}
-function scheduleAuto(a){
-  if(CRON_JOBS[a.id]){try{CRON_JOBS[a.id].stop();}catch{}delete CRON_JOBS[a.id];}
-  if(!a.active||!a.cron) return;
-  try {
-    CRON_JOBS[a.id]=cron.schedule(a.cron,async()=>{
-      a.lastRun=new Date().toISOString(); a.runCount=(a.runCount||0)+1; saveAutoReg();
-      const sid=uid(); const s=sessGet(sid);
-      s.messages.push({role:'user',content:a.task});
-      try{const r=await agentLoop(s,sid,null);a.lastResult=r.slice(0,1000);}
-      catch(e){a.lastResult=`Error: ${e.message}`;}
-      saveAutoReg();
-    });
-  } catch(e){auditLog('error','automation',`schedule failed: ${e.message}`);}
-}
-Object.values(AUTO_REG).forEach(a=>scheduleAuto(a));
-
 // ── ROUTES ────────────────────────────────────────────────────────────────────
+app.get('/health',(req,res)=>res.json({
+  status:'ok',version:'NEXUS-1.0',uptime:Math.floor(process.uptime()),
+  tools:TOOLS.length,memory:Object.keys(rj(path.join(DATA,'memory','global.json'),{})).length
+}));
 
-app.get('/health',(req,res)=>res.json({status:'ok',version:'15.0',platform:'AGII',timestamp:new Date().toISOString(),agents:Object.keys(AGENTS).length,uptime:Math.floor(process.uptime())}));
-
-// CHAT — SSE Streaming
 app.post('/api/chat',async(req,res)=>{
+  const {message,sessionId=uid(),imageUrl}=req.body;
+  if(!message) return res.status(400).json({error:'message required'});
+  
   res.setHeader('Content-Type','text/event-stream');
   res.setHeader('Cache-Control','no-cache');
   res.setHeader('Connection','keep-alive');
-  res.setHeader('X-Accel-Buffering','no');
-  const send=d=>{try{if(!res.writableEnded)res.write(`data: ${JSON.stringify(d)}\n\n`);}catch{}};
-  try {
-    const {message,sessionId=uid(),model,imageUrl,useMission=false}=req.body;
-    if(!message){send({type:'error',message:'No message'});return res.end();}
-    const session=sessGet(sessionId);
-    if(model) session.model=model;
-    const userContent=imageUrl?[{type:'image_url',image_url:{url:imageUrl}},{type:'text',text:message}]:message;
-    session.messages.push({role:'user',content:userContent,ts:new Date().toISOString()});
-    session.messageCount=(session.messageCount||0)+1;
-    if(session.messages.length===1&&session.title==='New Conversation')
-      session.title=(typeof message==='string'?message:'Vision').slice(0,65)+(message.length>65?'…':'');
-    send({type:'start',sessionId});
-    const complex=useMission||(typeof message==='string'&&message.length>120&&/\b(build|create|develop|implement|research and|analyze and|design|write a complete|generate a full)\b/i.test(message));
-    let finalResponse='';
-    if(complex){
-      send({type:'status',text:'🧠 Orchestrating multi-agent mission...'});
-      const mission=await runMission(message,sessionId,send);
-      if(mission?.synthesis&&mission.synthesis.length>50){
-        send({type:'status',text:'🔗 Synthesizing results...'});
-        const sc=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages:[{role:'system',content:PERSONAS['default'].systemPrompt},{role:'user',content:`Original request: "${message}"\n\nAgent outputs:\n\n${mission.synthesis}\n\nSynthesize into a clear, comprehensive, well-structured response.`}],temperature:0.5,max_tokens:3000});
-        finalResponse=sc.choices[0].message.content;
-      } else {finalResponse=await agentLoop(session,sessionId,send);}
-    } else {finalResponse=await agentLoop(session,sessionId,send);}
-    const words=finalResponse.split(' ');
-    for(let i=0;i<words.length;i++){send({type:'token',text:(i===0?'':' ')+words[i]});if(i%10===0)await new Promise(r=>setTimeout(r,3));}
-    session.messages.push({role:'assistant',content:finalResponse,ts:new Date().toISOString()});
-    sessSave(sessionId);
-    send({type:'done',sessionId,title:session.title,messageCount:session.messages.length});
-    res.end();
-    auditLog('info','chat',`session:${sessionId}`,{msg:message.slice(0,80)});
-  } catch(e){auditLog('error','chat',e.message);send({type:'error',message:e.message});res.end();}
+  const send=(d)=>res.write(`data: ${JSON.stringify(d)}\n\n`);
+  
+  const session=getSession(sessionId);
+  session.messages.push({role:'user',content:message,timestamp:new Date().toISOString()});
+  if(session.messages.length===1) session.title=message.slice(0,60);
+  
+  send({type:'start',sessionId});
+  
+  try{
+    const response=await agentLoop(session,sessionId,send);
+    // Stream response token by token
+    const words=response.split(' ');
+    for(const w of words){ send({type:'token',text:w+' '}); }
+    session.messages.push({role:'assistant',content:response,timestamp:new Date().toISOString()});
+    saveSession(sessionId);
+    send({type:'done',sessionId,messageCount:session.messages.length});
+  } catch(e){
+    send({type:'error',message:e.message});
+  }
+  res.end();
 });
 
-// Sessions
-app.get('/api/sessions',(req,res)=>res.json(sessList()));
-app.get('/api/sessions/:id',(req,res)=>{const f=path.join(DATA,'sessions',`${req.params.id}.json`);const d=rj(f,null);if(!d)return res.status(404).json({error:'Not found'});res.json(d);});
-app.delete('/api/sessions/:id',(req,res)=>{const f=path.join(DATA,'sessions',`${req.params.id}.json`);if(fs.existsSync(f))fs.unlinkSync(f);delete SC[req.params.id];res.json({success:true});});
-app.patch('/api/sessions/:id',(req,res)=>{const f=path.join(DATA,'sessions',`${req.params.id}.json`);const d=rj(f,null);if(!d)return res.status(404).json({error:'Not found'});if(req.body.pinned!==undefined)d.pinned=req.body.pinned;if(req.body.title!==undefined)d.title=req.body.title;wj(f,d);res.json({success:true});});
-
-// Memory
-app.get('/api/memory',(req,res)=>res.json(GM));
-app.get('/api/memory/search',(req,res)=>res.json(memSearch(req.query.q||'')));
-app.post('/api/memory',(req,res)=>res.json({success:true,entry:memAdd(req.body.type||'notes',req.body.content||'')}));
-app.delete('/api/memory/:type/:id',(req,res)=>{const{type,id}=req.params;if(GM[type]){GM[type]=GM[type].filter(i=>i.id!==id);saveMem();}res.json({success:true});});
-app.delete('/api/memory',(req,res)=>{Object.keys(GM).forEach(k=>GM[k]=[]);saveMem();res.json({success:true});});
-
-// Knowledge
-app.get('/api/knowledge',(req,res)=>{const lim=parseInt(req.query.limit)||200;res.json({nodes:KG.nodes.slice(-lim),edges:KG.edges.slice(-lim),total:{nodes:KG.nodes.length,edges:KG.edges.length}});});
-
-// Agents
-app.get('/api/agents',(req,res)=>res.json(agentList()));
-app.post('/api/agents/:role/run',async(req,res)=>{
-  const role=req.params.role;
-  if(!AGENTS[role]) return res.status(404).json({error:`Agent '${role}' not found`});
-  const task=taskNew(uid(),role,req.body.task||'');
-  const result=await runAgentTask(task,uid(),null);
-  res.json({success:result.success,role,result:result.result,error:result.error,ms:result.ms});
+app.get('/api/sessions',(req,res)=>{
+  try{
+    const dir=path.join(DATA,'sessions');
+    const sessions=fs.existsSync(dir)?fs.readdirSync(dir).filter(f=>f.endsWith('.json')).map(f=>{
+      const d=rj(path.join(dir,f));
+      return {id:d.id,title:d.title||'Untitled',created:d.created,messageCount:d.messages?.length||0};
+    }).filter(s=>s.id).sort((a,b)=>new Date(b.created)-new Date(a.created)).slice(0,50):[];
+    res.json(sessions);
+  }catch(e){res.json([]);}
 });
 
-// Tasks
-app.get('/api/tasks',(req,res)=>res.json(Object.values(TASKS).sort((a,b)=>new Date(b.created)-new Date(a.created)).slice(0,parseInt(req.query.limit)||100)));
-app.get('/api/tasks/:id',(req,res)=>{const t=TASKS[req.params.id];if(!t)return res.status(404).json({error:'Not found'});res.json(t);});
+app.get('/api/sessions/:id',(req,res)=>{
+  const s=getSession(req.params.id);
+  res.json(s);
+});
 
-// Models
-app.get('/api/models',(req,res)=>res.json([
-  {id:'llama-3.3-70b-versatile',name:'Llama 4 Scout 17B',provider:'Groq',speed:'Fast',recommended:true,vision:true},
-  {id:'llama-3.1-8b-instant',name:'Llama 3.1 8B',provider:'Groq',speed:'Ultra Fast'},
-  {id:'llama-3.3-70b-versatile',name:'Llama 4 Scout 17B',provider:'Groq',speed:'Fast',vision:true},
-  {id:'deepseek-r1-distill-llama-70b',name:'DeepSeek R1 70B',provider:'Groq',speed:'Medium',reasoning:true},
-  {id:'qwen-qwq-32b',name:'Qwen QwQ 32B',provider:'Groq',speed:'Medium',reasoning:true},
-  {id:'mixtral-8x7b-32768',name:'Mixtral 8x7B',provider:'Groq',speed:'Fast'},
-  {id:'gemma2-9b-it',name:'Gemma 2 9B',provider:'Groq',speed:'Fast'},
-]));
+app.delete('/api/sessions/:id',(req,res)=>{
+  const f=path.join(DATA,'sessions',`${req.params.id}.json`);
+  if(fs.existsSync(f)) fs.unlinkSync(f);
+  delete SESSIONS[req.params.id];
+  res.json({success:true});
+});
 
-// Skills
-const getSkills=()=>rj(path.join(DATA,'skills','registry.json'),{});
-app.get('/api/skills',(req,res)=>res.json(Object.values(getSkills())));
-app.post('/api/skills',(req,res)=>{const SK=getSkills();const id=(req.body.name||'skill').replace(/[^a-zA-Z0-9_]/g,'_');SK[id]={id,name:req.body.name,description:req.body.description||'',code:req.body.code||'',created:new Date().toISOString(),runCount:0};wj(path.join(DATA,'skills','registry.json'),SK);res.json({success:true,id});});
-app.delete('/api/skills/:id',(req,res)=>{const SK=getSkills();delete SK[req.params.id];wj(path.join(DATA,'skills','registry.json'),SK);res.json({success:true});});
-app.post('/api/skills/:id/run',async(req,res)=>{const result=await runTool('run_skill',{name:req.params.id,args:req.body.args||{}},uid());res.json(result);});
+app.get('/api/memory',(req,res)=>{
+  const mem=rj(path.join(DATA,'memory','global.json'),{});
+  const sys=rj(path.join(DATA,'memory','system_context.json'),{version:1,improvements:[]});
+  res.json({memories:mem,systemVersion:sys.version,improvementCount:sys.improvements.length});
+});
 
-// Automations
-app.get('/api/automations',(req,res)=>res.json(Object.values(AUTO_REG)));
-app.post('/api/automations',(req,res)=>{const id=uid();AUTO_REG[id]={id,name:req.body.name,description:req.body.description||'',task:req.body.task,cron:req.body.cron,active:true,created:new Date().toISOString(),runCount:0};saveAutoReg();scheduleAuto(AUTO_REG[id]);res.json({success:true,id});});
-app.patch('/api/automations/:id',(req,res)=>{const a=AUTO_REG[req.params.id];if(!a)return res.status(404).json({error:'Not found'});if(req.body.active!==undefined){a.active=req.body.active;scheduleAuto(a);}if(req.body.name)a.name=req.body.name;if(req.body.task)a.task=req.body.task;if(req.body.cron){a.cron=req.body.cron;scheduleAuto(a);}saveAutoReg();res.json({success:true});});
-app.delete('/api/automations/:id',(req,res)=>{if(CRON_JOBS[req.params.id]){try{CRON_JOBS[req.params.id].stop();}catch{}delete CRON_JOBS[req.params.id];}delete AUTO_REG[req.params.id];saveAutoReg();res.json({success:true});});
+app.get('/api/files',(req,res)=>{
+  const filesDir=path.join(DATA,'files');
+  const files=fs.existsSync(filesDir)?fs.readdirSync(filesDir).map(f=>{
+    const stat=fs.statSync(path.join(filesDir,f));
+    return {name:f,size:stat.size,modified:stat.mtime.toISOString()};
+  }):[];
+  res.json(files);
+});
 
-// Personas
-app.get('/api/personas',(req,res)=>res.json(Object.values(PERSONAS)));
-app.post('/api/personas',(req,res)=>{const id=uid();PERSONAS[id]={id,...req.body,created:new Date().toISOString()};savePersonas();res.json({success:true,id});});
-app.put('/api/personas/:id',(req,res)=>{if(!PERSONAS[req.params.id])return res.status(404).json({error:'Not found'});Object.assign(PERSONAS[req.params.id],req.body);savePersonas();res.json({success:true});});
+app.get('/api/files/:filename',(req,res)=>{
+  const f=path.join(DATA,'files',req.params.filename);
+  if(!fs.existsSync(f)) return res.status(404).json({error:'Not found'});
+  res.download(f);
+});
 
-// Projects
-const getProjects=()=>rj(path.join(DATA,'projects','registry.json'),{});
-app.get('/api/projects',(req,res)=>res.json(Object.values(getProjects())));
-app.post('/api/projects',(req,res)=>{const PR=getProjects();const id=uid();PR[id]={id,name:req.body.name,description:req.body.description||'',goals:req.body.goals||[],status:'active',created:new Date().toISOString()};wj(path.join(DATA,'projects','registry.json'),PR);res.json({success:true,id});});
-app.delete('/api/projects/:id',(req,res)=>{const PR=getProjects();delete PR[req.params.id];wj(path.join(DATA,'projects','registry.json'),PR);res.json({success:true});});
+app.get('/api/projects',(req,res)=>{
+  const dir=path.join(DATA,'projects');
+  const projects=fs.existsSync(dir)?fs.readdirSync(dir).filter(d=>fs.existsSync(path.join(dir,d,'_meta.json'))).map(d=>rj(path.join(dir,d,'_meta.json'))):[];
+  res.json(projects);
+});
 
-// Files
-app.get('/api/files',(req,res)=>{try{const dir=path.join(DATA,'files');res.json(fs.readdirSync(dir).map(f=>{const s=fs.statSync(path.join(dir,f));return{name:f,size:s.size,modified:s.mtime,url:`/api/files/${f}`};}));}catch{res.json([]);}});
-app.get('/api/files/:name',(req,res)=>{const fn=req.params.name.replace(/[^a-zA-Z0-9._\-]/g,'_');const fp=path.join(DATA,'files',fn);if(!fs.existsSync(fp))return res.status(404).json({error:'Not found'});res.download(fp,fn);});
-app.delete('/api/files/:name',(req,res)=>{const fn=req.params.name.replace(/[^a-zA-Z0-9._\-]/g,'_');const fp=path.join(DATA,'files',fn);if(fs.existsSync(fp))fs.unlinkSync(fp);res.json({success:true});});
-app.post('/api/upload',upload.single('file'),(req,res)=>{if(!req.file)return res.status(400).json({error:'No file'});const ext=path.extname(req.file.originalname);const dest=path.join(DATA,'files',req.file.filename+ext);fs.moveSync(req.file.path,dest);res.json({success:true,filename:req.file.filename+ext,url:`/api/files/${req.file.filename+ext}`});});
-
-// Logs
-app.get('/api/logs',(req,res)=>{try{const day=req.query.date||new Date().toISOString().slice(0,10);const logs=rj(path.join(DATA,'logs',`${day}.json`),[]);const filtered=req.query.level?logs.filter(l=>l.level===req.query.level):logs;res.json(filtered.slice(-300).reverse());}catch{res.json([]);}});
-
-// Stats
-app.get('/api/stats',(req,res)=>{
-  const ss=sessList();
-  const SK=getSkills(); const PR=getProjects();
-  const tasks=Object.values(TASKS);
-  res.json({
-    sessions:ss.length,
-    totalMessages:ss.reduce((s,x)=>s+(x.messageCount||0),0),
-    memoryItems:Object.values(GM).reduce((s,a)=>s+(Array.isArray(a)?a.length:0),0),
-    skills:Object.keys(SK).length,
-    automations:Object.keys(AUTO_REG).length,
-    agents:Object.keys(AGENTS).length,
-    tasks:tasks.length,
-    tasksSuccess:tasks.filter(t=>t.status==='completed').length,
-    tasksFailed:tasks.filter(t=>t.status==='failed').length,
-    knowledgeNodes:KG.nodes.length,
-    projects:Object.keys(PR).length,
-    files:fs.readdirSync(path.join(DATA,'files')).length,
-    uptime:Math.floor(process.uptime()),
-    version:'15.0'
+app.get('/api/projects/:id/download',(req,res)=>{
+  const {exec}=require('child_process');
+  const dir=path.join(DATA,'projects',req.params.id);
+  if(!fs.existsSync(dir)) return res.status(404).json({error:'Not found'});
+  const zipPath=`/tmp/${req.params.id}.zip`;
+  exec(`zip -r ${zipPath} .`,{cwd:dir},()=>{
+    if(fs.existsSync(zipPath)) res.download(zipPath);
+    else res.status(500).json({error:'Zip failed'});
   });
 });
 
-// Mission
-app.post('/api/mission',async(req,res)=>{
-  const{description,sessionId=uid()}=req.body;
-  if(!description) return res.status(400).json({error:'No description'});
-  const result=await runMission(description,sessionId,null);
-  res.json(result||{error:'Mission failed'});
-});
-
-// Benchmarks
-app.post('/api/benchmark',async(req,res)=>{const result=await runTool('evaluate_performance',{capability:req.body.capability||'reasoning'},uid());res.json(result);});
-app.get('/api/benchmark/history',(req,res)=>res.json(rj(path.join(DATA,'evaluations','history.json'),[]).slice(-100).reverse()));
-
-const PORT=process.env.PORT||3000;
-server.listen(PORT,()=>{
-  console.log(`\n🚀 AGII v15 | Port ${PORT} | ${Object.keys(AGENTS).length} agents | ${TOOLS.length} tools`);
-  auditLog('info','server',`started on port ${PORT}`);
-});
+app.listen(PORT,()=>console.log(`🚀 NEXUS v1.0 | Port ${PORT} | ${TOOLS.length} tools`));

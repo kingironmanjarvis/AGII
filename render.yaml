@@ -6,14 +6,27 @@ services:
     buildCommand: npm install
     startCommand: node server.js
     envVars:
+      - key: PORT
+        value: 3001
       - key: GROQ_API_KEY
         sync: false
-      - key: NODE_ENV
-        value: production
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: E2B_API_KEY
+        sync: false
+      - key: TOGETHER_API_KEY
+        sync: false
+      - key: DATA_DIR
+        value: /tmp/agii-data
+    plan: free
 
   - type: web
     name: agii-v10-frontend
     env: static
     rootDir: frontend
-    buildCommand: echo "Static site"
-    staticPublishPath: .
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://agii-v10-backend.onrender.com
+    plan: free

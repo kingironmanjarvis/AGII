@@ -304,9 +304,18 @@ async function handleChat(req, res) {
     try {
       resp=await callGroq({model:mid,messages:callMsgs,tools:TOOLS,tool_choice:'auto',temperature:0.7,max_tokens:4096});
     } catch(e) {
-      try {
-        resp=await callGroq({model:MODELS['llama-3.3-70b'].id,messages:callMsgs.filter(m=>m.role!=='tool').map(m=>({role:m.role,content:m.content||''})),temperature:0.7,max_tokens:4096});
-      } catch(e2) { sse(res,{type:'error',message:e2.message}); return sseDone(res,sessionId); }
+      // Fallback model chain on rate limit
+      const fallbacks=['llama-3.1-8b-instant','gemma2-9b-it','mixtral-8x7b-32768'];
+      let gotResp=false;
+      for(const fb of fallbacks){
+        try{
+          const simpleMsgs=callMsgs.filter(m=>m.role!=='tool'&&!m.tool_calls).map(m=>({role:m.role,content:m.content||''}));
+          resp=await callGroq({model:fb,messages:simpleMsgs,temperature:0.7,max_tokens:2048});
+          sse(res,{type:'thinking',note:'fallback_model',model:fb});
+          gotResp=true; break;
+        }catch(fe){continue;}
+      }
+      if(!gotResp){sse(res,{type:'error',message:'All models rate-limited, try again in 30s'}); return sseDone(res,sessionId);}
     }
     const msg=resp.choices[0].message;
     // Detect python_tag / plain-text tool calls from Llama models

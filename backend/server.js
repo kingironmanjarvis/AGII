@@ -428,10 +428,37 @@ async function agentLoop(session, sessionId, send) {
   const sys=`${persona.systemPrompt}\n\nCurrent date/time: ${new Date().toISOString()}\n${mc?`\nPersistent memory:\n${mc}`:''}`;
   const messages=[{role:'system',content:sys},...session.messages.slice(-24).map(cm)];
   let finalResponse=''; let itr=0;
+  // Helper: parse XML-format tool calls from Groq's failed_generation
+  function parseXmlToolCall(fg) {
+    // Matches: <function=TOOLNAME {"key":"val"}> or <function=TOOLNAME({"key":"val"})>
+    const m = fg && fg.match(/<function=([\w_]+)[\s({]*(\{.*?\})[)\s]*<\/function>/s);
+    if (!m) return null;
+    try { return {name:m[1], args:JSON.parse(m[2])}; } catch { return null; }
+  }
+
   while(itr<12){
     itr++;
     const toolModel=session.model||'llama-3.3-70b-versatile';
-    const comp=await groq.chat.completions.create({model:toolModel,messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096,parallel_tool_calls:false});
+    let comp, compErr=null;
+    try {
+      comp=await groq.chat.completions.create({model:toolModel,messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096,parallel_tool_calls:false});
+    } catch(e) {
+      compErr = e;
+      // Try to parse XML tool call from the error
+      const errBody = e?.error?.failed_generation || (e?.message?.includes('failed_generation') ? e.message : null);
+      const xmlCall = errBody && parseXmlToolCall(errBody);
+      if (xmlCall) {
+        if(send) send({type:'tool_start',tool:xmlCall.name,args:xmlCall.args});
+        const tr=await runTool(xmlCall.name,xmlCall.args,sessionId);
+        if(send) send({type:'tool_result',tool:xmlCall.name,result:tr,success:tr.success});
+        // Inject as assistant+tool into messages and continue
+        const fakeId='call_'+Math.random().toString(36).slice(2);
+        messages.push({role:'assistant',content:null,tool_calls:[{id:fakeId,type:'function',function:{name:xmlCall.name,arguments:JSON.stringify(xmlCall.args)}}]});
+        messages.push({role:'tool',tool_call_id:fakeId,content:JSON.stringify(tr)});
+        continue;
+      }
+      throw e;
+    }
     const choice=comp.choices[0]; const msg=choice.message;
     messages.push(cm(msg));
     if(choice.finish_reason==='tool_calls'&&msg.tool_calls){

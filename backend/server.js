@@ -115,11 +115,11 @@ const AGENTS = {
     prompt:'You are a world-class research agent. Search thoroughly, synthesize multiple sources, verify facts, deliver comprehensive reports with citations.' },
   coder:      { name:'Code Engineer', emoji:'💻', model:'llama-3.3-70b', tools:['execute_code','write_file','web_search'],
     prompt:'You are an expert software engineer. Write production-quality code, execute it to verify it works, fix errors, deliver working tested solutions.' },
-  analyst:    { name:'Analyst', emoji:'📊', model:'mixtral-8x7b', tools:['execute_code','web_search','write_file'],
+  analyst:    { name:'Analyst', emoji:'📊', model:'llama-3.1-8b', tools:['execute_code','web_search','write_file'],
     prompt:'You are a data analyst. Analyze data, run computations, create insights, deliver actionable findings.' },
   writer:     { name:'Writer', emoji:'✍️', model:'llama-3.3-70b', tools:['write_file','web_search'],
     prompt:'You are a professional writer. Create clear, compelling content tailored for the audience.' },
-  scientist:  { name:'Scientist', emoji:'🔬', model:'mixtral-8x7b', tools:['execute_code','web_search','write_file'],
+  scientist:  { name:'Scientist', emoji:'🔬', model:'llama-3.1-8b', tools:['execute_code','web_search','write_file'],
     prompt:'Expert scientist: physics, chemistry, biology, quantum mechanics, aerospace, engineering. Solve problems with mathematical rigor.' },
   planner:    { name:'Planner', emoji:'📋', model:'gemma2-9b', tools:['remember','write_file'],
     prompt:'Strategic planner. Break complex goals into executable steps, identify dependencies, create actionable project plans.' },
@@ -456,9 +456,10 @@ app.post('/api/mission',async(req,res)=>{
   sse(res,{type:'mission_start',goal:goal.slice(0,100),sessionId});
   let plan;
   try{
-    const r=await callGroq({model:MODELS['llama-3.3-70b'].id,messages:[{role:'user',content:`Break this goal into 2-4 subtasks, each for a specialist agent.\nGoal: "${goal}"\nAgents: ${Object.keys(AGENTS).join(', ')}\nJSON: {"tasks":[{"role":"name","task":"what to do"}]}`}],temperature:0.3,max_tokens:600});
+    const r=await callGroq({model:MODELS['llama-3.3-70b'].id,messages:[{role:'user',content:`Break this goal into exactly 2 subtasks for specialist agents (no more than 2).\nGoal: "${goal}"\nAgents: ${Object.keys(AGENTS).join(', ')}\nJSON: {"tasks":[{"role":"name","task":"what to do"}]}`}],temperature:0.3,max_tokens:600});
     const c=r.choices[0].message.content||'';
     plan=JSON.parse(c.slice(c.indexOf('{'),c.lastIndexOf('}')+1));
+    if(plan.tasks?.length>2)plan.tasks=plan.tasks.slice(0,2); // limit to 2 agents to avoid rate limiting
   }catch{plan={tasks:[{role:'researcher',task:goal}]};}
   sse(res,{type:'plan',tasks:plan.tasks});
   const results=[];
@@ -466,6 +467,7 @@ app.post('/api/mission',async(req,res)=>{
     if(!AGENTS[role])continue;
     const r=await toolSpawnAgent({role,task},res,sessionId);
     results.push({role,result:r.result?.slice(0,400)||''});
+    await new Promise(res=>setTimeout(res,2000)); // rate limit buffer
   }
   sse(res,{type:'thinking',phase:'synthesizing'});
   try{

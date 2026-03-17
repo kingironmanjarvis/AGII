@@ -328,7 +328,7 @@ async function runAgentTask(task, sessionId, send) {
     let result=''; let itr=0;
     while(itr<6) {
       itr++;
-      const comp=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages,tools:TOOLS,tool_choice:'auto',temperature:agent.temp||0.4,max_tokens:3000});
+      const comp=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages,tools:TOOLS,tool_choice:'auto',temperature:agent.temp||0.4,max_tokens:3000,parallel_tool_calls:false});
       const choice=comp.choices[0]; const msg=choice.message;
       messages.push(cm(msg));
       if(choice.finish_reason==='tool_calls'&&msg.tool_calls) {
@@ -399,7 +399,7 @@ async function runMission(desc, sessionId, send) {
 
 // ── PERSONAS ─────────────────────────────────────────────────────────────────
 const PERSONAS_FILE=path.join(DATA,'personas','registry.json');
-let PERSONAS=rj(PERSONAS_FILE,{default:{id:'default',name:'AGII',avatar:'🤖',model:'llama-3.3-70b-versatile',temperature:0.7,systemPrompt:`You are AGII — a production-grade distributed AI agent platform built for real work.\n\nYou have 11 specialized agents you can coordinate, persistent memory across sessions, real tool execution (web search, code execution, file creation, URL fetching), and multi-agent mission orchestration.\n\nYour principles:\n- Use tools proactively. Don't say "I would search..." — actually search using web_search.\n- For complex tasks, spawn specialized agents or run reason_deep first.\n- Store important information to memory automatically using remember.\n- Create files when producing code, reports, or structured data using write_file.\n- Be direct, precise, and thorough. Show what tools you used.\n- When producing code, always write it to a file using write_file so the user can download it.`,created:new Date().toISOString()}});
+let PERSONAS=rj(PERSONAS_FILE,{default:{id:'default',name:'AGII',avatar:'🤖',model:'llama-3.3-70b-versatile',temperature:0.7,systemPrompt:`You are AGII — a production-grade distributed AI agent platform built for real work.\n\nYou have 11 specialized agents you can coordinate, persistent memory across sessions, real tool execution (web search, code execution, file creation, URL fetching), and multi-agent mission orchestration.\n\nYour principles:\n- Use tools proactively whenever relevant. Always execute tools rather than describing what you would do.\n- For complex tasks, spawn specialized agents or run reason_deep first.\n- Store important information to memory automatically.\n- Create downloadable files when producing code, reports, or structured data.\n- Be direct, precise, and thorough. Show what tools you used.\n- When producing code, always write it to a file using write_file so the user can download it.`,created:new Date().toISOString()}});
 function savePersonas(){wj(PERSONAS_FILE,PERSONAS);}
 
 // ── SESSIONS ─────────────────────────────────────────────────────────────────
@@ -430,7 +430,8 @@ async function agentLoop(session, sessionId, send) {
   let finalResponse=''; let itr=0;
   while(itr<12){
     itr++;
-    const comp=await groq.chat.completions.create({model:'llama-3.3-70b-versatile',messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096});
+    const toolModel=session.model||'llama-3.3-70b-versatile';
+    const comp=await groq.chat.completions.create({model:toolModel,messages,tools:TOOLS,tool_choice:'auto',temperature:persona.temperature||0.7,max_tokens:4096,parallel_tool_calls:false});
     const choice=comp.choices[0]; const msg=choice.message;
     messages.push(cm(msg));
     if(choice.finish_reason==='tool_calls'&&msg.tool_calls){

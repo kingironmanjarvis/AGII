@@ -256,23 +256,22 @@ async function runTool(name, args, res, sessionId) {
   } catch(e) { return {success:false,error:e.message}; }
 }
 
-const SYSTEM_PROMPT = `You are AGII — an advanced autonomous AI agent. You have real tools. USE THEM.
+const SYSTEM_PROMPT = `You are AGII, an advanced AI agent with structured tool-calling.
 
-TOOLS YOU HAVE:
-- web_search: real-time internet search. Use for ANY current info, news, prices, facts you might not know.
-- execute_code: run Python/JS/bash in cloud sandbox. Use for ALL calculations, data processing, code tasks.
-- remember / recall: persistent memory across sessions.
-- write_file: create downloadable files.
-- spawn_agent: delegate to specialist (researcher, coder, analyst, writer, scientist, planner).
+IMPORTANT: Use the API tool_calls format. NEVER output raw text like web_search("query") — use the tool calling API.
+
+USE TOOLS:
+- web_search: current events, news, prices, today data, recent research
+- execute_code: math, code, algorithms, data processing  
+- spawn_agent: complex research or writing tasks
+- remember / recall: memory management
+- write_file: create files
 
 RULES:
-1. For current info → SEARCH, never guess.
-2. For code/math → EXECUTE, never just show code.
-3. For complex tasks → SPAWN the right agent.
-4. Be direct, precise, expert-level. No filler.
-5. You operate in ALL domains: engineering, physics, quantum, biology, medicine, finance, law, aerospace, software, chemistry.
-
-You are not a chatbot. You are an agent that gets things done.`;
+1. Current events/news: ALWAYS call web_search via tool_calls API
+2. Math/calculations: ALWAYS call execute_code via tool_calls API
+3. Never describe what you are doing, just call the tool
+4. Expert-level in all domains: software, science, finance, law, medicine`;
 
 async function handleChat(req, res) {
   const {message, sessionId:sid, model:mp} = req.body;
@@ -310,6 +309,36 @@ async function handleChat(req, res) {
       } catch(e2) { sse(res,{type:'error',message:e2.message}); return sseDone(res,sessionId); }
     }
     const msg=resp.choices[0].message;
+    // Detect python_tag / plain-text tool calls from Llama models
+    const _raw = msg.content||'';
+    const _ptag = _raw.match(/<\|python_tag\|>([\s\S]*?)(?:<\|[a-z_]+\|>|$)/);
+    const _pcall = !_ptag && /^(web_search|execute_code|remember|recall|write_file|spawn_agent)\s*\(/.test(_raw.trim());
+    if ((_ptag||_pcall) && !msg.tool_calls?.length) {
+      const callText = _ptag ? _ptag[1].trim() : _raw.trim();
+      const fnM = callText.match(/^(\w+)\(([\s\S]*)\)\s*$/s);
+      if (fnM) {
+        const [,fn,argsRaw] = fnM;
+        let pa = {};
+        try {
+          const s = argsRaw.trim();
+          if (s.startsWith('{')) pa = JSON.parse(s);
+          else {
+            const kvs = [...s.matchAll(/(\w+)\s*=\s*["']([^"']*)["']/g)];
+            if (kvs.length) { kvs.forEach(([,k,v])=>{pa[k]=v;}); }
+            else { const sm = s.match(/^["']([\s\S]*)["']$/); if(sm){ if(fn==='web_search')pa={query:sm[1]};else if(fn==='execute_code')pa={code:sm[1],language:'python'};else pa={content:sm[1]};} }
+          }
+        } catch {}
+        console.log('[ptag-recovery] fn='+fn+' args='+JSON.stringify(pa).slice(0,80));
+        sse(res,{type:'tool_start',tool:fn,args:pa});
+        const tr = await runTool(fn,pa,res,sessionId);
+        session.tool_calls++;
+        toolsUsed.push({tool:fn,success:!!tr.success});
+        sse(res,{type:'tool_result',tool:fn,result:tr,success:!!tr.success});
+        callMsgs.push({role:'assistant',content:null,tool_calls:[{id:'r'+Date.now(),type:'function',function:{name:fn,arguments:JSON.stringify(pa)}}]});
+        callMsgs.push({role:'tool',tool_call_id:'r'+Date.now(),name:fn,content:JSON.stringify(tr).slice(0,8000)});
+        continue;
+      }
+    }
     if (!msg.tool_calls?.length) {
       const text=msg.content||'';
       const words=text.split(/(\s+)/);
